@@ -1,61 +1,61 @@
 import { Image } from 'expo-image';
 import * as SplashScreen from 'expo-splash-screen';
-import { useState } from 'react';
-import { Dimensions, StyleSheet, View } from 'react-native';
-import Animated, { Easing, Keyframe } from 'react-native-reanimated';
-import { scheduleOnRN } from 'react-native-worklets';
+import { useEffect, useRef } from 'react';
+import { Dimensions, StyleSheet, useWindowDimensions, View } from 'react-native';
+import Animated, {
+  Easing,
+  Keyframe,
+  useAnimatedStyle,
+  useSharedValue,
+  withDelay,
+  withTiming,
+} from 'react-native-reanimated';
 
 const INITIAL_SCALE_FACTOR = Dimensions.get('screen').height / 90;
 const DURATION = 600;
+const SPLASH_DELAY_MS = 2000; // Splash ekranının ekranda kalma süresi (ms)
 
 export function AnimatedSplashOverlay() {
-  const [animate, setAnimate] = useState(false);
-  const [visible, setVisible] = useState(true);
+  const { width } = useWindowDimensions();
+  const opacity = useSharedValue(1);
+  const isHidden = useSharedValue(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  if (!visible) return null;
+  const isTablet = width >= 768;
+  const splashSource = isTablet
+    ? require('@/assets/images/splashastablet.png')
+    : require('@/assets/images/splashas.png');
 
-  const splashKeyframe = new Keyframe({
-    0: {
-      transform: [{ scale: 1 }],
-      opacity: 1,
-    },
-    20: {
-      opacity: 1,
-    },
-    70: {
-      opacity: 0,
-      easing: Easing.elastic(0.7),
-    },
-    100: {
-      opacity: 0,
-      transform: [{ scale: 1 }],
-      easing: Easing.elastic(0.7),
-    },
-  });
+  useEffect(() => {
+    // Native splash gizle, sonra JS overlay'i animasyonla kapat
+    timerRef.current = setTimeout(() => {
+      SplashScreen.hideAsync().then(() => {
+        opacity.value = withDelay(
+          100,
+          withTiming(0, { duration: DURATION, easing: Easing.out(Easing.ease) }, (finished) => {
+            'worklet';
+            if (finished) {
+              isHidden.value = true;
+            }
+          })
+        );
+      });
+    }, SPLASH_DELAY_MS);
 
-  const image = <Image style={styles.image} source={require('@/assets/images/expo-logo.png')} />;
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
-  return animate ? (
-    <Animated.View
-      entering={splashKeyframe.duration(DURATION).withCallback((finished) => {
-        'worklet';
-        if (finished) {
-          scheduleOnRN(setVisible, false);
-        }
-      })}
-      style={styles.splashOverlay}>
-      {image}
+  const overlayStyle = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    display: isHidden.value ? 'none' : 'flex',
+  }));
+
+  return (
+    <Animated.View style={[styles.splashOverlay, overlayStyle]}>
+      <Image style={styles.splashImage} contentFit="cover" source={splashSource} />
     </Animated.View>
-  ) : (
-    <View
-      onLayout={() => {
-        SplashScreen.hideAsync().finally(() => {
-          setAnimate(true);
-        });
-      }}
-      style={styles.splashOverlay}>
-      {image}
-    </View>
   );
 }
 
@@ -144,5 +144,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 1000,
+  },
+  splashImage: {
+    width: '100%',
+    height: '100%',
   },
 });

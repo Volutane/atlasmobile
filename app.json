@@ -1,23 +1,35 @@
 {
   "expo": {
-    "name": "blank",
-    "slug": "blank",
+    "name": "Atlas Lojistik",
+    "slug": "atlas-lojistik",
     "version": "1.0.0",
-    "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "orientation": "default",
+    "icon": "./assets/images/linkloj.png",
     "scheme": "blank",
-    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/images/splashas.png",
+      "tabletImage": "./assets/images/splashastablet.png",
+      "resizeMode": "cover",
+      "backgroundColor": "#ffffff"
+    },
     "ios": {
-      "icon": "./assets/expo.icon"
+      "supportsTablet": true,
+      "icon": "./assets/expo.icon",
+      "splash": {
+        "image": "./assets/images/splashas.png",
+        "tabletImage": "./assets/images/splashastablet.png",
+        "resizeMode": "cover",
+        "backgroundColor": "#ffffff"
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/images/linkloj.png",
+        "backgroundColor": "#208AEF"
       },
-      "predictiveBackGestureEnabled": false
+      "package": "com.linklojistik.apa",
+      "predictiveBackGestureEnabled": false,
+      "usesCleartextTraffic": true
     },
     "web": {
       "output": "static",
@@ -28,11 +40,14 @@
       [
         "expo-splash-screen",
         {
+          "image": "./assets/images/splashas.png",
+          "tabletImage": "./assets/images/splashastablet.png",
+          "resizeMode": "cover",
           "backgroundColor": "#208AEF",
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": "100%"
         }
-      ]
+      ],
+      "expo-image"
     ],
     "experiments": {
       "typedRoutes": true,
