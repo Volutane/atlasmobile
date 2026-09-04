@@ -17,7 +17,7 @@ import { useAuth } from '@/context/auth-context';
 import { useResponsive } from '@/hooks/use-responsive';
 import { useTheme } from '@/hooks/use-theme';
 import { QuotationForCreateOfferModel } from '@/types/quotation';
-import { OptionItem, SearchablePickerModal } from './kotasyon-arama';
+import { getOrFetchAllPorts, globalContainerMap, OptionItem, SearchablePickerModal } from './kotasyon-arama';
 
 function normalizeKeysDeep<T = any>(input: any): T {
   if (Array.isArray(input)) {
@@ -51,6 +51,9 @@ const RATES_TO_USD: Record<string, number> = {
   '€': 1.1662,
   GBP: 1.3636,
   '£': 1.3636,
+  TRY: 0.0245,
+  TL: 0.0245,
+  '₺': 0.0245,
 };
 
 export function convertToUSD(amount: number, currency?: string, customRate?: number): number {
@@ -83,6 +86,111 @@ export function convertCurrency(amount: number, fromCurr: string, toCurr: string
   return Math.round(result * 100) / 100;
 }
 
+export function isImportCommercialType(...values: any[]): boolean {
+  for (const val of values) {
+    if (!val) continue;
+    const str = String(val)
+      .replace(/İ/g, 'i')
+      .replace(/I/g, 'i')
+      .toLowerCase()
+      .replace(/\u0307/g, '');
+    if (str.includes('ithal') || str.includes('import')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function getAutoKdvForExpense(expenseName?: string): string {
+  if (!expenseName) return '0';
+  const name = expenseName.trim().toUpperCase();
+  if (
+    name.includes('NAVLUN') ||
+    name.includes('FREIGHT') ||
+    name.includes('EMISSION') ||
+    name.includes('FUEL') ||
+    name.includes('SURCHARGE') ||
+    name.includes('BAF') ||
+    name.includes('CAF') ||
+    name.includes('EBS')
+  ) {
+    return '0';
+  }
+  return '20';
+}
+
+export async function fetchExpenseInfo(
+  expenseRid: string,
+  baseUrl: string,
+  token: string
+): Promise<{ rid?: string; masraf?: string; kdv?: number; unitname?: string; masrafkodu?: string } | null> {
+  const cleanRid = cleanGuidOrUndefined(expenseRid);
+  if (!cleanRid) return null;
+
+  try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${baseUrl}/ExpenseType/GetExpenseInfo`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ expenserid: cleanRid, EXPENSERID: cleanRid }),
+    }).catch(() => null);
+
+    if (res && res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data) {
+        const norm = normalizeKeysDeep(data);
+        console.log('[GetExpenseInfo SUCCESS]', cleanRid, norm);
+
+        const kdvRaw =
+          norm.expensekdv ??
+          norm.kdv ??
+          norm.vat ??
+          data?.expensekdv ??
+          data?.EXPENSEKDV ??
+          data?.kdv;
+
+        const unitNameRaw =
+          norm.expensebeher ??
+          norm.unitname ??
+          norm.beher ??
+          norm.unit ??
+          data?.expensebeher ??
+          data?.EXPENSEBEHER ??
+          data?.unitname;
+
+        const masrafRaw =
+          norm.expensename ??
+          norm.expensetype ??
+          norm.masraf ??
+          norm.masrafing ??
+          norm.optionlabel ??
+          norm.name ??
+          data?.expensename ??
+          data?.EXPENSENAME ??
+          data?.masraf;
+
+        return {
+          rid: norm.rid || norm.expenserid || cleanRid,
+          masraf: masrafRaw ? String(masrafRaw) : undefined,
+          kdv: kdvRaw !== undefined && kdvRaw !== null && String(kdvRaw) !== '' ? Number(kdvRaw) : undefined,
+          unitname: unitNameRaw ? String(unitNameRaw) : undefined,
+          masrafkodu: norm.masrafkodu,
+        };
+      }
+    }
+  } catch (err) {
+    console.log('[GetExpenseInfo ERROR]', err);
+  }
+  return null;
+}
+
 export interface ExpenseItem {
   id: string;
   allIn: string; // "Evet" | "Hayır"
@@ -92,10 +200,12 @@ export interface ExpenseItem {
   alisFiyati: string | number;
   alisDoviz: string;
   alisTarafi: string;
+  alisTarafiRid?: string;
   satisFiyati: string | number;
   satisDoviz: string;
   beher: string;
   satisTarafi: string;
+  satisTarafiRid?: string;
   isCustomAdded?: boolean;
 }
 
@@ -104,11 +214,12 @@ export interface ContainerGroup {
   containerType: string;
   isAllIn?: boolean;
   allInRow?: {
+    expenseRid?: string;
     masrafTipi?: string;
     satisFiyati: string;
     satisDoviz: string;
-    alisDoviz: string;
-    satisTarafi: string;
+    alisDoviz?: string;
+    satisTarafi?: string;
   };
   expenses: ExpenseItem[];
 }
@@ -176,8 +287,60 @@ const INCOTERM_OPTIONS = [
 
 const ODEME_TIPI_OPTIONS = ['Prepaid', 'Collect'];
 
-const SATIS_CURRENCY_OPTIONS = ['EURO', 'USD', 'GBP'];
+const SATIS_CURRENCY_OPTIONS = ['EUR', 'USD', 'GBP', 'TL'];
 const BEHER_OPTIONS = ['CNT', 'CBM', 'SET', 'KG', 'BL'];
+
+export function resolveToContainerGuid(rid?: string, name?: string): string | null {
+  // 1) Zaten geçerli GUID ise direkt kullan
+  const clean = cleanGuidOrUndefined(rid);
+  if (clean) return clean;
+
+  // 2) İsimle cache (Select2 / prefetch ile doldurulmuş globalContainerMap)
+  const n = String(name || '').toLowerCase().replace(/['"]/g, '').trim();
+  if (!n) return null;
+
+  if (globalContainerMap[n]) return globalContainerMap[n];
+
+  // Kısmi eşleşme
+  for (const [key, guid] of Object.entries(globalContainerMap)) {
+    if (key.includes(n) || n.includes(key)) return guid;
+  }
+
+  return null; // asla yanlış hardcoded GUID dönme
+}
+
+export function toSiteCurrency(val?: string, fallback = 'EUR'): string {
+  const r = String(val || fallback).trim().toUpperCase();
+  if (!r || r.includes('SEÇ') || r.includes('SEC')) return fallback;
+  if (r === 'EURO' || r === 'EUR' || r === '€') return 'EUR';
+  if (r === 'USD' || r === '$') return 'USD';
+  if (r === 'GBP' || r === '£') return 'GBP';
+  if (r === 'TRY' || r === 'TL' || r === '₺') return 'TL';
+  return r;
+}
+
+export function normalizeSellCurrency(val?: string, fallbackAlis?: string): string {
+  return toSiteCurrency(val, toSiteCurrency(fallbackAlis, 'EUR'));
+}
+
+export function toMoneyString(val: any): string {
+  if (val === null || val === undefined || val === '') return '0';
+  return String(val).replace(/\s/g, '').replace(',', '.');
+}
+
+export function rowProfitStr(exp: ExpenseItem): { text: string; num: number } {
+  const qty = parseFloat(toMoneyString(exp.miktar)) || 1;
+  const buy = (parseFloat(toMoneyString(exp.alisFiyati)) || 0) * qty;
+  const sell = (parseFloat(toMoneyString(exp.satisFiyati)) || 0) * qty;
+  const buyUSD = convertToUSD(buy, exp.alisDoviz);
+  const sellUSD = convertToUSD(sell, normalizeSellCurrency(exp.satisDoviz, exp.alisDoviz));
+  const p = sellUSD - buyUSD;
+  if (isNaN(p)) return { text: '—', num: 0 };
+  const isNeg = p < 0;
+  const isPos = p > 0;
+  const text = `${isNeg ? '-' : isPos ? '+' : ''}${Math.abs(p).toFixed(2)} $`;
+  return { text, num: p };
+}
 
 
 function parseExpenseItem(
@@ -292,22 +455,42 @@ function parseExpenseItem(
     '';
 
   const satisFiyatiVal =
+    rawItem?.sellingcost ??
+    rawItem?.SELLINGCOST ??
     rawItem?.sellingprice ??
     rawItem?.SELLINGPRICE ??
     rawItem?.satisfiyati ??
     rawItem?.SATISFIYATI ??
+    rawItem?.satis_fiyati ??
+    rawItem?.SATIS_FIYATI ??
     rawItem?.salesprice ??
     rawItem?.SALESPRICE ??
+    rawItem?.salescost ??
+    rawItem?.SALESCOST ??
     '';
 
-  const satisDovizVal =
+  const rawSellingCurr =
     rawItem?.sellingcurrency ||
     rawItem?.SELLINGCURRENCY ||
     rawItem?.satisdoviz ||
     rawItem?.SATISDOVIZ ||
     rawItem?.salescurrency ||
     rawItem?.SALESCURRENCY ||
-    (alisDovizVal === 'USD' ? 'USD' : 'EURO');
+    rawItem?.offercurrency ||
+    rawItem?.OFFERCURRENCY ||
+    rawItem?.currency ||
+    rawItem?.CURRENCY ||
+    rawItem?.doviz ||
+    rawItem?.DOVIZ ||
+    rawItem?.currencycode ||
+    rawItem?.CURRENCYCODE;
+
+  const normalizedRawSell =
+    rawSellingCurr === 'EUR' || rawSellingCurr === '€'
+      ? 'EURO'
+      : rawSellingCurr;
+
+  const satisDovizVal = normalizeSellCurrency(normalizedRawSell, alisDovizVal);
 
   const defaultBeher = String(masrafName).toUpperCase().includes('ENS') ? 'BL' : 'CNT';
   const beherVal =
@@ -329,6 +512,23 @@ function parseExpenseItem(
     fallbackCustomer ||
     '';
 
+  const alisTarafiRid =
+    cleanGuidOrUndefined(rawItem?.buyingcustomerrid) ||
+    cleanGuidOrUndefined(rawItem?.BUYINGCUSTOMERRID) ||
+    cleanGuidOrUndefined(rawItem?.buyinginvoicecustomerrid) ||
+    cleanGuidOrUndefined(rawItem?.BUYINGINVOICECUSTOMERRID) ||
+    cleanGuidOrUndefined(rawItem?.buyingcustomer_rid) ||
+    cleanGuidOrUndefined(rawItem?.loaderrid) ||
+    cleanGuidOrUndefined(rawItem?.LOADERRID) ||
+    cleanGuidOrUndefined(rawItem?.customer_rid);
+
+  const satisTarafiRid =
+    cleanGuidOrUndefined(rawItem?.salesinvoicecustomerrid) ||
+    cleanGuidOrUndefined(rawItem?.SALESINVOICECUSTOMERRID) ||
+    cleanGuidOrUndefined(rawItem?.sellingcustomerrid) ||
+    cleanGuidOrUndefined(rawItem?.SELLINGCUSTOMERRID) ||
+    cleanGuidOrUndefined(rawItem?.customer_rid);
+
   return {
     id:
       rawItem?.expenserid ||
@@ -345,12 +545,23 @@ function parseExpenseItem(
     kdv: String(kdvVal),
     miktar: String(miktarVal),
     alisFiyati: String(alisFiyatiVal),
-    alisDoviz: String(alisDovizVal),
+    alisDoviz: toSiteCurrency(alisDovizVal, 'EUR'),
     alisTarafi: String(alisTarafiVal),
+    alisTarafiRid: alisTarafiRid,
     satisFiyati: String(satisFiyatiVal),
-    satisDoviz: String(satisDovizVal),
+    satisDoviz: toSiteCurrency(satisDovizVal, toSiteCurrency(alisDovizVal, 'EUR')),
     beher: String(beherVal),
     satisTarafi: String(satisTarafiVal),
+    satisTarafiRid: satisTarafiRid,
+    isCustomAdded:
+      rawItem?.isaddedlater === 1 ||
+      rawItem?.ISADDEDLATER === 1 ||
+      rawItem?.isCustomAdded === true ||
+      rawItem?.iscustomadded === 1 ||
+      rawItem?.expensefromtype === 'OFFER' ||
+      rawItem?.EXPENSEFROMTYPE === 'OFFER' ||
+      rawItem?.expensefromtype === 'CUSTOM' ||
+      rawItem?.EXPENSEFROMTYPE === 'CUSTOM',
   };
 }
 
@@ -411,11 +622,18 @@ function buildContainerGroups(
     });
 
     offerExpenses.forEach((exp: any) => {
-      const expType = exp.CONTAINERTYPE || exp.containertype || exp.containertypeshort || exp.CONTAINERTYPESHORT || '';
-      let cRid = exp.CONTAINERRID || exp.containerrid;
+      const expType =
+        exp.CONTAINERTYPE || exp.containertype ||
+        exp.CONTAINERTYPESHORT || exp.containertypeshort || '';
 
-      // If cRid not provided, try matching by container type name
-      if (!cRid && expType) {
+      let cRid =
+        cleanGuidOrUndefined(exp.CONTAINERRID) ||
+        cleanGuidOrUndefined(exp.containerrid) ||
+        cleanGuidOrUndefined(exp.CONTAINERTYPERID) ||
+        cleanGuidOrUndefined(exp.containertyperid);
+
+      // If cRid not provided or not in groupMap, try matching by container type name
+      if ((!cRid || !groupMap.has(cRid)) && expType) {
         for (const [key, val] of groupMap.entries()) {
           if (val.type.toLowerCase() === expType.toLowerCase()) {
             cRid = key;
@@ -424,7 +642,10 @@ function buildContainerGroups(
         }
       }
 
-      if (!cRid) cRid = Array.from(groupMap.keys())[0] || 'cont_default';
+      if (!cRid || !groupMap.has(cRid)) {
+        cRid = Array.from(groupMap.keys())[0] || 'cont_default';
+      }
+
       const finalType = expType || groupMap.get(cRid)?.type || '40 High Cube';
 
       if (!groupMap.has(cRid)) groupMap.set(cRid, { type: finalType, expenses: [] });
@@ -705,13 +926,25 @@ export function KotasyonTeklifScreen({
   const primaryQuotation: QuotationForCreateOfferModel | undefined =
     selectedQuotation || (selectedQuotations && selectedQuotations[0]);
 
-  const ticariTipiStr = searchParams?.ticariTipi || '';
-  const isIthalat =
-    ticariTipiStr.includes('İthalat') ||
-    ticariTipiStr.includes('ITHALAT') ||
-    ticariTipiStr.toLowerCase().includes('ithal');
+  const isIthalat = isImportCommercialType(
+    searchParams?.ticariTipi,
+    searchParams?.COMMERCIALTYPE,
+    searchParams?.commercialType,
+    searchParams?.commercialtype,
+    searchParams?.commercialTypeState,
+    searchParams?.ticari,
+    searchParams?.type,
+    (primaryQuotation as any)?.commercialtype,
+    (primaryQuotation as any)?.COMMERCIALTYPE,
+    (primaryQuotation as any)?.commercialType,
+    (primaryQuotation as any)?.ticariTipi
+  );
 
-  const isDirectImport = !primaryQuotation || isIthalat;
+  const isDirectImport =
+    !primaryQuotation ||
+    isIthalat ||
+    searchParams?.kotasyonKullanimi === 'Hayır' ||
+    searchParams?.kotasyonKullanimi === 'hayır';
 
   // General Offer Form State
   const [kotasyonNo, setKotasyonNo] = useState<string>(
@@ -721,7 +954,7 @@ export function KotasyonTeklifScreen({
     primaryQuotation?.customername || searchParams?.customerName || ''
   );
   const [hat, setHat] = useState<string>(
-    primaryQuotation?.line || searchParams?.hat || ''
+    searchParams?.hat || primaryQuotation?.line || (primaryQuotation as any)?.lineName || ''
   );
   const [kotasyonGecerlilik, setKotasyonGecerlilik] = useState<string>(
     primaryQuotation?.quotationvaliditydate || (primaryQuotation as any)?.validitydate || searchParams?.kotasyonGecerlilik || ''
@@ -739,17 +972,60 @@ export function KotasyonTeklifScreen({
     primaryQuotation?.quotationvaliditydate || (primaryQuotation as any)?.validitydate || searchParams?.kotasyonGecerlilik || getTodayDateString()
   );
 
+  const hasQuotation = !!primaryQuotation;
+
+  const quotationLoadingPortName =
+    (primaryQuotation as any)?.loadingport ||
+    (primaryQuotation as any)?.LOADINGPORT ||
+    (primaryQuotation as any)?.loadingportname ||
+    (primaryQuotation as any)?.LOADINGPORTNAME ||
+    (primaryQuotation as any)?.loadingportshort ||
+    (primaryQuotation as any)?.LOADINGPORTSHORT ||
+    (primaryQuotation as any)?.loadingportcode ||
+    (primaryQuotation as any)?.LOADINGPORTCODE ||
+    (primaryQuotation as any)?.portofloading ||
+    (primaryQuotation as any)?.PORTOFLOADING ||
+    (primaryQuotation as any)?.pol ||
+    (primaryQuotation as any)?.POL ||
+    '';
+
+  const quotationDischargePortName =
+    (primaryQuotation as any)?.dischargeport ||
+    (primaryQuotation as any)?.DISCHARGEPORT ||
+    (primaryQuotation as any)?.dischargeportname ||
+    (primaryQuotation as any)?.DISCHARGEPORTNAME ||
+    (primaryQuotation as any)?.dischargeportshort ||
+    (primaryQuotation as any)?.DISCHARGEPORTSHORT ||
+    (primaryQuotation as any)?.dischargeportcode ||
+    (primaryQuotation as any)?.DISCHARGEPORTCODE ||
+    (primaryQuotation as any)?.portofdischarge ||
+    (primaryQuotation as any)?.PORTOFDISCHARGE ||
+    (primaryQuotation as any)?.pod ||
+    (primaryQuotation as any)?.POD ||
+    '';
+
   const [yuklemeYeri, setYuklemeYeri] = useState<string>(
-    primaryQuotation?.loadinglocation || primaryQuotation?.loadinglocationshort || searchParams?.yuklemeYeri || ''
+    (primaryQuotation as any)?.loadinglocation ||
+    (primaryQuotation as any)?.LOADINGLOCATION ||
+    (primaryQuotation as any)?.loadinglocationname ||
+    (primaryQuotation as any)?.loadinglocationshort ||
+    searchParams?.yuklemeYeri ||
+    ''
   );
   const [yuklemeLimani, setYuklemeLimani] = useState<string>(
-    primaryQuotation?.loadingport || searchParams?.yuklemeLimani || ''
+    hasQuotation ? quotationLoadingPortName : (searchParams?.yuklemeLimani || '')
   );
   const [tahliyeYeri, setTahliyeYeri] = useState<string>(
-    primaryQuotation?.dischargelocation || primaryQuotation?.dischargelocationshort || searchParams?.tahliyeYeri || searchParams?.teslimYeri || ''
+    (primaryQuotation as any)?.dischargelocation ||
+    (primaryQuotation as any)?.DISCHARGELOCATION ||
+    (primaryQuotation as any)?.dischargelocationname ||
+    (primaryQuotation as any)?.dischargelocationshort ||
+    searchParams?.tahliyeYeri ||
+    searchParams?.teslimYeri ||
+    ''
   );
   const [tahliyeLimani, setTahliyeLimani] = useState<string>(
-    primaryQuotation?.dischargeport || searchParams?.tahliyeLimani || searchParams?.teslimLimani || ''
+    hasQuotation ? quotationDischargePortName : (searchParams?.tahliyeLimani || searchParams?.teslimLimani || '')
   );
   const [dolumTipi, setDolumTipi] = useState<string>(
     primaryQuotation?.fillingtype || searchParams?.dolumTipi || 'Fabrika Dolum'
@@ -757,28 +1033,40 @@ export function KotasyonTeklifScreen({
 
   // RID states for line, ports, and locations (will be updated when detail endpoint completes)
   const [lineRid, setLineRid] = useState<string | undefined>(
-    cleanGuidOrUndefined((primaryQuotation as any)?.linerid) ||
-    cleanGuidOrUndefined((primaryQuotation as any)?.LINERID) ||
-    cleanGuidOrUndefined((primaryQuotation as any)?.lineRid) ||
-    cleanGuidOrUndefined((primaryQuotation as any)?.lineRID) ||
     cleanGuidOrUndefined(searchParams?.lineRID) ||
     cleanGuidOrUndefined(searchParams?.lineRid) ||
     cleanGuidOrUndefined(searchParams?.hatRID) ||
-    cleanGuidOrUndefined(searchParams?.hatRid)
+    cleanGuidOrUndefined(searchParams?.hatRid) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.linerid) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.LINERID) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.lineRid) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.lineRID)
   );
 
-  const [loadingPortRid, setLoadingPortRid] = useState<string | undefined>(
+  const quotationLoadingPortRid =
     cleanGuidOrUndefined((primaryQuotation as any)?.loadingportrid) ||
     cleanGuidOrUndefined((primaryQuotation as any)?.LOADINGPORTRID) ||
-    cleanGuidOrUndefined(searchParams?.loadingPortRID) ||
-    cleanGuidOrUndefined(searchParams?.loadingPortRid)
+    cleanGuidOrUndefined((primaryQuotation as any)?.portofloadingrid) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.PORTOFLOADINGRID) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.polrid);
+
+  const [loadingPortRid, setLoadingPortRid] = useState<string | undefined>(
+    hasQuotation
+      ? quotationLoadingPortRid
+      : (cleanGuidOrUndefined(searchParams?.loadingPortRID) || cleanGuidOrUndefined(searchParams?.loadingPortRid))
   );
 
-  const [dischargePortRid, setDischargePortRid] = useState<string | undefined>(
+  const quotationDischargePortRid =
     cleanGuidOrUndefined((primaryQuotation as any)?.dischargeportrid) ||
     cleanGuidOrUndefined((primaryQuotation as any)?.DISCHARGEPORTRID) ||
-    cleanGuidOrUndefined(searchParams?.dischargePortRID) ||
-    cleanGuidOrUndefined(searchParams?.dischargePortRid)
+    cleanGuidOrUndefined((primaryQuotation as any)?.portofdischargerid) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.PORTOFDISCHARGERID) ||
+    cleanGuidOrUndefined((primaryQuotation as any)?.podrid);
+
+  const [dischargePortRid, setDischargePortRid] = useState<string | undefined>(
+    hasQuotation
+      ? quotationDischargePortRid
+      : (cleanGuidOrUndefined(searchParams?.dischargePortRID) || cleanGuidOrUndefined(searchParams?.dischargePortRid))
   );
 
   const [loadingLocationRid, setLoadingLocationRid] = useState<string | undefined>(
@@ -805,8 +1093,20 @@ export function KotasyonTeklifScreen({
   const [shippingMode, setShippingMode] = useState<string>(searchParams?.yuklemeTipi || 'FCL');
   const [offerRidState, setOfferRidState] = useState<string | null>(null);
 
-  const [yanicilik, setYanicilik] = useState<string>('Yanıcısız');
-  const [yanicilikAciklama, setYanicilikAciklama] = useState<string>('');
+  const [yanicilik, setYanicilik] = useState<string>(
+    (primaryQuotation as any)?.flammability ||
+    (primaryQuotation as any)?.FLAMMABILITY ||
+    searchParams?.tehlikelilikDurumu ||
+    searchParams?.flammability ||
+    'Yanıcısız'
+  );
+  const [yanicilikAciklama, setYanicilikAciklama] = useState<string>(
+    (primaryQuotation as any)?.flammabilitydescription ||
+    (primaryQuotation as any)?.FLAMMABILITYDESCRIPTION ||
+    searchParams?.flammabilityDescription ||
+    searchParams?.flammabilitydescription ||
+    ''
+  );
   const [incoterm, setIncoterm] = useState<string>(searchParams?.incoterm || '');
 
   const [yukleyici, setYukleyici] = useState<string>(
@@ -853,6 +1153,13 @@ export function KotasyonTeklifScreen({
       if (p.portexpenses != null && p.portexpenses !== '') setPortExpenses(String(p.portexpenses));
     }
   }, [primaryQuotation]);
+
+  // Sayfa açıldığında liman listesini arka planda hemen indirmeye başla (kotasyon arama sayfasında olduğu gibi)
+  useEffect(() => {
+    if (activeBaseUrl) {
+      getOrFetchAllPorts(activeBaseUrl, authToken).catch(() => {});
+    }
+  }, [activeBaseUrl, authToken]);
 
   const [loaderSearchModal, setLoaderSearchModal] = useState<{
     visible: boolean;
@@ -1003,10 +1310,8 @@ export function KotasyonTeklifScreen({
         const qLoadingRID =
           cleanGuidOrUndefined((primaryQuotation as any)?.selectedloadinglocationrid) ||
           cleanGuidOrUndefined((primaryQuotation as any)?.loadinglocationrid) ||
-          cleanGuidOrUndefined((primaryQuotation as any)?.selectedloadingportrid) ||
-          cleanGuidOrUndefined((primaryQuotation as any)?.loadingportrid) ||
           cleanGuidOrUndefined(searchParams?.loadingLocationRID) ||
-          cleanGuidOrUndefined(searchParams?.loadingPortRID) ||
+          cleanGuidOrUndefined(searchParams?.loadingLocationRid) ||
           null;
 
         const body: Record<string, any> = {
@@ -1038,17 +1343,75 @@ export function KotasyonTeklifScreen({
               const foundLineRid = cleanGuidOrUndefined(data.linerid || data.linerid || data.lineRid || data.lineRID || data.hatrid || data.hatrid);
               if (foundLineRid) setLineRid(foundLineRid);
 
-              const foundLoadingPortRid = cleanGuidOrUndefined(data.loadingportrid || data.loadingportrid || data.loadingportrid);
+              const foundLoadingPortRid = cleanGuidOrUndefined(
+                data.loadingportrid || data.LOADINGPORTRID || data.portofloadingrid || data.PORTOFLOADINGRID || data.polrid
+              );
               if (foundLoadingPortRid) setLoadingPortRid(foundLoadingPortRid);
 
-              const foundDischargePortRid = cleanGuidOrUndefined(data.dischargeportrid || data.dischargeportrid || data.dischargeportrid);
+              const foundDischargePortRid = cleanGuidOrUndefined(
+                data.dischargeportrid || data.DISCHARGEPORTRID || data.portofdischargerid || data.PORTOFDISCHARGERID || data.podrid
+              );
               if (foundDischargePortRid) setDischargePortRid(foundDischargePortRid);
 
-              const foundLoadingLocationRid = cleanGuidOrUndefined(data.loadinglocationrid || data.loadinglocationrid || data.selectedloadinglocationrid);
+              const foundLoadingLocationRid = cleanGuidOrUndefined(
+                data.loadinglocationrid || data.LOADINGLOCATIONRID || data.selectedloadinglocationrid
+              );
               if (foundLoadingLocationRid) setLoadingLocationRid(foundLoadingLocationRid);
 
-              const foundDischargeLocationRid = cleanGuidOrUndefined(data.dischargelocationrid || data.dischargelocationrid);
+              const foundDischargeLocationRid = cleanGuidOrUndefined(
+                data.dischargelocationrid || data.DISCHARGELOCATIONRID
+              );
               if (foundDischargeLocationRid) setDischargeLocationRid(foundDischargeLocationRid);
+
+              const foundLoadingPortName =
+                data.loadingport ||
+                data.LOADINGPORT ||
+                data.loadingportname ||
+                data.LOADINGPORTNAME ||
+                data.loadingportshort ||
+                data.LOADINGPORTSHORT ||
+                data.portofloading ||
+                data.PORTOFLOADING ||
+                data.pol ||
+                data.POL;
+              if (foundLoadingPortName && String(foundLoadingPortName).trim() !== '') {
+                setYuklemeLimani(String(foundLoadingPortName).trim());
+              }
+
+              const foundDischargePortName =
+                data.dischargeport ||
+                data.DISCHARGEPORT ||
+                data.dischargeportname ||
+                data.DISCHARGEPORTNAME ||
+                data.dischargeportshort ||
+                data.DISCHARGEPORTSHORT ||
+                data.portofdischarge ||
+                data.PORTOFDISCHARGE ||
+                data.pod ||
+                data.POD;
+              if (foundDischargePortName && String(foundDischargePortName).trim() !== '') {
+                setTahliyeLimani(String(foundDischargePortName).trim());
+              }
+
+              const foundLoadingLocationName =
+                data.loadinglocation ||
+                data.LOADINGLOCATION ||
+                data.loadinglocationname ||
+                data.LOADINGLOCATIONNAME ||
+                data.loadinglocationshort;
+              if (foundLoadingLocationName && String(foundLoadingLocationName).trim() !== '') {
+                setYuklemeYeri(String(foundLoadingLocationName).trim());
+              }
+
+              const foundDischargeLocationName =
+                data.dischargelocation ||
+                data.DISCHARGELOCATION ||
+                data.dischargelocationname ||
+                data.DISCHARGELOCATIONNAME ||
+                data.dischargelocationshort;
+              if (foundDischargeLocationName && String(foundDischargeLocationName).trim() !== '') {
+                setTahliyeYeri(String(foundDischargeLocationName).trim());
+              }
 
               if (data.line) setHat(String(data.line));
 
@@ -1070,84 +1433,69 @@ export function KotasyonTeklifScreen({
               ];
 
               // Merge navlun container costs from containersinfo if missing
-              const contInfo = data.containersinfo || data.containers || [];
-              if (Array.isArray(contInfo)) {
-                contInfo.forEach((c: any) => {
-                  const navlunCost = c.containercost ?? c.CONTAINERCOST;
-                  if (navlunCost !== undefined && parseFloat(String(navlunCost)) > 0) {
-                    const navlunExists = detailExpenses.some(
-                      (e: any) =>
-                        (e.expensetype || e.optionlabel || '').toUpperCase().includes('NAVLUN') &&
-                        (e.containertype || e.CONTAINERTYPE || '').toUpperCase() === (c.containertype || '').toUpperCase()
-                    );
-                    if (!navlunExists) {
-                      detailExpenses.push({
-                        expensetype: 'DENİZYOLU NAVLUN ÜCRETİ',
-                        buyingcost: navlunCost,
-                        buyingcurrency: c.currency || c.doviz || 'EUR',
-                        containertype: c.containertype || c.containertypeshort,
-                        containerrid: c.containerrid || c.id,
-                        beher: 'CNT',
-                      });
-                    }
-                  }
-                });
-              }
+              // Resolve primary container type & RID from quotation header / search params
+              const primaryQuotationContainerType =
+                (primaryQuotation as any)?.containertype ||
+                (primaryQuotation as any)?.CONTAINERTYPE ||
+                (primaryQuotation as any)?.containertypeshort ||
+                (primaryQuotation as any)?.containersinfo?.[0]?.containertype ||
+                (primaryQuotation as any)?.containersinfo?.[0]?.CONTAINERTYPE ||
+                data?.containertype ||
+                data?.CONTAINERTYPE ||
+                data?.containersinfo?.[0]?.containertype ||
+                searchParams?.konteynerTipi ||
+                (Array.isArray(searchParams?.konteynerTipleri) ? searchParams?.konteynerTipleri?.[0] : searchParams?.konteynerTipleri) ||
+                '40 High Cube';
+
+              const primaryQuotationContainerRid =
+                cleanGuidOrUndefined((primaryQuotation as any)?.containerrid) ||
+                cleanGuidOrUndefined((primaryQuotation as any)?.CONTAINERRID) ||
+                cleanGuidOrUndefined((primaryQuotation as any)?.containersinfo?.[0]?.containerrid) ||
+                cleanGuidOrUndefined((primaryQuotation as any)?.containersinfo?.[0]?.id) ||
+                cleanGuidOrUndefined(data?.containersinfo?.[0]?.containerrid) ||
+                resolveToContainerGuid(undefined, primaryQuotationContainerType) ||
+                'a992765f-1f8d-4a05-945c-2e621d9ab1a1';
+
+              console.log('[RESOLVED QUOTATION CONTAINER TYPE]', primaryQuotationContainerType, primaryQuotationContainerRid);
 
               if (detailExpenses.length > 0) {
-                const groupMap = new Map<string, { type: string; expenses: ExpenseItem[] }>();
+                const groupMap = new Map<string, { rid: string; type: string; expenses: ExpenseItem[] }>();
 
-                // Collect explicit container types
-                const containerTypesSet = new Set<string>();
-                detailExpenses.forEach((exp: any) => {
-                  const rawType = exp.containertype || exp.CONTAINERTYPE || exp.containertypeshort || exp.CONTAINERTYPESHORT;
-                  if (rawType && String(rawType).trim() !== '' && String(rawType).toUpperCase() !== 'BL' && String(rawType).toUpperCase() !== 'GENEL') {
-                    containerTypesSet.add(String(rawType).trim());
-                  }
-                });
-
-                if (containerTypesSet.size === 0) {
-                  const primaryType = (primaryQuotation as any)?.containertype || '40 High Cube';
-                  containerTypesSet.add(primaryType);
-                }
-
-                containerTypesSet.forEach((cType) => {
-                  groupMap.set(cType.toUpperCase(), { type: cType, expenses: [] });
-                });
-
-                const generalList: ExpenseItem[] = [];
-
-                detailExpenses.forEach((exp: any) => {
-                  const rawType = exp.containertype || exp.CONTAINERTYPE || exp.containertypeshort || exp.CONTAINERTYPESHORT;
-                  const item = parseExpenseItem(exp, lineVal, customerVal);
-
-                  if (rawType && String(rawType).trim() !== '' && String(rawType).toUpperCase() !== 'BL' && String(rawType).toUpperCase() !== 'GENEL') {
-                    const groupKey = String(rawType).trim().toUpperCase();
-                    if (!groupMap.has(groupKey)) {
-                      groupMap.set(groupKey, { type: String(rawType).trim(), expenses: [] });
+                // Seed container groups from containersinfo or primaryQuotationContainerType
+                const contInfo = data.containersinfo || data.containers || (primaryQuotation as any)?.containersinfo || [];
+                if (Array.isArray(contInfo) && contInfo.length > 0) {
+                  contInfo.forEach((c: any) => {
+                    const cType = c.containertype || c.CONTAINERTYPE || c.containertypeshort || primaryQuotationContainerType;
+                    const cRid = resolveToContainerGuid(c.containerrid || c.CONTAINERRID || c.id, cType) || primaryQuotationContainerRid;
+                    if (!groupMap.has(cType.toUpperCase())) {
+                      groupMap.set(cType.toUpperCase(), { rid: cRid, type: cType, expenses: [] });
                     }
-                    groupMap.get(groupKey)!.expenses.push(item);
-                  } else {
-                    generalList.push(item);
-                  }
-                });
-
-                // Attach general/BL expenses to all container groups
-                if (generalList.length > 0) {
-                  groupMap.forEach((g) => {
-                    generalList.forEach((genExp) => {
-                      const exists = g.expenses.some(
-                        (e) => e.masrafTipi === genExp.masrafTipi && e.id === genExp.id
-                      );
-                      if (!exists) {
-                        g.expenses.push(genExp);
-                      }
-                    });
                   });
                 }
 
-                const groups: ContainerGroup[] = Array.from(groupMap.values()).map((g, idx) => ({
-                  containerRid: `cnt_det_${idx}`,
+                if (groupMap.size === 0) {
+                  groupMap.set(primaryQuotationContainerType.toUpperCase(), {
+                    rid: primaryQuotationContainerRid,
+                    type: primaryQuotationContainerType,
+                    expenses: [],
+                  });
+                }
+
+                // Parse and distribute detailExpenses into container groups
+                detailExpenses.forEach((exp: any) => {
+                  const item = parseExpenseItem(exp, lineVal, customerVal);
+                  groupMap.forEach((g) => {
+                    const exists = g.expenses.some(
+                      (e) => e.id === item.id || (e.masrafTipi === item.masrafTipi && e.alisFiyati === item.alisFiyati)
+                    );
+                    if (!exists) {
+                      g.expenses.push({ ...item });
+                    }
+                  });
+                });
+
+                const groups: ContainerGroup[] = Array.from(groupMap.values()).map((g) => ({
+                  containerRid: g.rid,
                   containerType: g.type,
                   expenses: g.expenses,
                 }));
@@ -1168,7 +1516,8 @@ export function KotasyonTeklifScreen({
         const containerTypeRid =
           cleanGuidOrUndefined((primaryQuotation as any)?.containersinfo?.[0]?.containerrid) ||
           cleanGuidOrUndefined((primaryQuotation as any)?.containersinfo?.[0]?.id) ||
-          'd9b3f037-3cc4-4f3a-92f8-ae0d7f62b8fc';
+          resolveToContainerGuid(undefined, (primaryQuotation as any)?.containertype || searchParams?.konteynerTipi) ||
+          'a992765f-1f8d-4a05-945c-2e621d9ab1a1';
 
         const expenseReq: any = {
           quotationrid: qRid,
@@ -1244,12 +1593,25 @@ export function KotasyonTeklifScreen({
           .filter((s) => s !== '');
       }
 
+      const containerRidsFromParams: string[] =
+        searchParams?.containerTypeRIDs ||
+        searchParams?.containerTypeRids ||
+        searchParams?.selectedContainerRids ||
+        [];
+
       if (selectedContainerList.length > 0) {
-        const groups: ContainerGroup[] = selectedContainerList.map((cType, idx) => ({
-          containerRid: `cnt_param_${idx}_${Date.now()}`,
-          containerType: cType,
-          expenses: [],
-        }));
+        const groups: ContainerGroup[] = selectedContainerList.map((cType, idx) => {
+          const paramRid = containerRidsFromParams[idx];
+          const resolvedGuid =
+            resolveToContainerGuid(paramRid, cType) ||
+            cleanGuidOrUndefined(paramRid) ||
+            `cnt_param_${idx}_${Date.now()}`;
+          return {
+            containerRid: resolvedGuid,
+            containerType: cType,
+            expenses: [],
+          };
+        });
 
         if (isMounted) {
           setContainerGroups(groups);
@@ -1257,10 +1619,14 @@ export function KotasyonTeklifScreen({
           return;
         }
       } else if (isMounted) {
+        const defaultType = searchParams?.konteynerTipi || '40 High Cube';
+        const defaultGuid =
+          resolveToContainerGuid(undefined, defaultType) ||
+          'a992765f-1f8d-4a05-945c-2e621d9ab1a1';
         setContainerGroups([
           {
-            containerRid: `cnt_default_${Date.now()}`,
-            containerType: '40 High Cube',
+            containerRid: defaultGuid,
+            containerType: defaultType,
             expenses: [],
           },
         ]);
@@ -1417,9 +1783,10 @@ export function KotasyonTeklifScreen({
       miktar: '1',
       alisFiyati: '',
       alisDoviz: 'EUR',
-      alisTarafi: hat || 'ACENTA',
+      alisTarafi: '',
+      alisTarafiRid: undefined,
       satisFiyati: '',
-      satisDoviz: 'EURO',
+      satisDoviz: '',
       beher: 'CNT',
       satisTarafi: yukleyici || kotasyonSahibi || '',
       isCustomAdded: true,
@@ -1454,7 +1821,7 @@ export function KotasyonTeklifScreen({
           isAllIn: checked,
           allInRow: g.allInRow || {
             satisFiyati: '',
-            satisDoviz: 'EURO',
+            satisDoviz: 'EUR',
             alisDoviz: 'EUR',
             satisTarafi: yukleyici || kotasyonSahibi || '',
           },
@@ -1503,34 +1870,92 @@ export function KotasyonTeklifScreen({
       return;
     }
 
-    if (!primaryQuotation && (!selectedQuotations || selectedQuotations.length === 0)) {
+    const isImport = isImportCommercialType(
+      searchParams?.ticariTipi,
+      searchParams?.COMMERCIALTYPE,
+      searchParams?.commercialType,
+      searchParams?.commercialtype,
+      searchParams?.commercialTypeState,
+      searchParams?.ticari,
+      searchParams?.type,
+      (primaryQuotation as any)?.commercialtype,
+      (primaryQuotation as any)?.COMMERCIALTYPE,
+      (primaryQuotation as any)?.commercialType,
+      (primaryQuotation as any)?.ticariTipi
+    );
+
+    const quotationRid =
+      cleanGuidOrUndefined((primaryQuotation as any)?.quotationrid) ||
+      cleanGuidOrUndefined((primaryQuotation as any)?.QUOTATIONRID) ||
+      cleanGuidOrUndefined((primaryQuotation as any)?.RID) ||
+      cleanGuidOrUndefined((primaryQuotation as any)?.rid) ||
+      cleanGuidOrUndefined(searchParams?.quotationRID) ||
+      cleanGuidOrUndefined(searchParams?.quotationRid);
+
+    const isNoQuotationRequired =
+      isImport ||
+      searchParams?.kotasyonKullanimi === 'Hayır' ||
+      searchParams?.kotasyonKullanimi === 'hayır' ||
+      searchParams?.useQuotation === false;
+
+    // İhracat (Kotasyonlu Evet): kotasyon zorunlu | İthalat & Kotasyonsuz İhracat (Hayır): opsiyonel
+    if (!isNoQuotationRequired && !quotationRid) {
       setSwalModal({
         visible: true,
         icon: 'warning',
-        title: 'İşlem Tamamlanamadı',
-        text: 'Teklif oluşturma işlemine devam edebilmek için lütfen önce bir kotasyon seçiniz.',
+        title: 'Uyarı',
+        text: 'Kotasyonlu ihracat teklifi için kotasyon seçimi zorunludur.',
       });
       return;
     }
 
-    // Basic validation
+    // Required fields validation
     let missingOptions = '';
+    if (!hat || hat.trim() === '' || hat === '—') missingOptions += 'Hat seçmeniz gerekmektedir.\n';
+    if (!yuklemeLimani || yuklemeLimani.trim() === '' || yuklemeLimani === 'Yükleme limanı seçiniz') missingOptions += 'Yükleme limanı seçmeniz gerekmektedir.\n';
+    if (!tahliyeLimani || tahliyeLimani.trim() === '' || tahliyeLimani === 'Tahliye limanı seçiniz') missingOptions += 'Tahliye limanı seçmeniz gerekmektedir.\n';
+    if (!incoterm || incoterm === 'Seçiniz') missingOptions += 'Incoterm seçmeniz gerekmektedir.\n';
     if (!teklifGecerlilik) missingOptions += 'Geçerlilik tarihi girmeniz gerekmektedir.\n';
     if (!odemeTipi) missingOptions += 'Ödeme tipini seçmeniz gerekmektedir.\n';
-    if (!incoterm || incoterm === 'Seçiniz') missingOptions += 'Incoterm seçmeniz gerekmektedir.\n';
 
-    // Satış fiyatı validasyonu: AllIn değilse her satırın satış fiyatı dolu olmalı
+    // Konteyner masrafı kontrolü
+    let totalExpenseRowsCount = 0;
     containerGroups.forEach((group) => {
       if (group.isAllIn) {
-        // AllIn modunda sadece allInRow’un satış fiyatı kontrol edilir
+        totalExpenseRowsCount += 1;
+      } else {
+        totalExpenseRowsCount += group.expenses.length;
+      }
+    });
+
+    if (totalExpenseRowsCount === 0) {
+      missingOptions += 'Konteyner masrafı seçimi / eklemesi zorunludur. En az 1 masraf eklemelisiniz.\n';
+    }
+
+    // Satış fiyatı ve Satış Dövizi validasyonu
+    containerGroups.forEach((group) => {
+      if (group.isAllIn) {
+        // AllIn modunda allInRow'un satış fiyatı ve dövizi kontrol edilir
         if (!group.allInRow?.satisFiyati || String(group.allInRow.satisFiyati).trim() === '') {
           missingOptions += `"${group.containerType}" konteyneri için AllIn satış fiyatı girilmesi gerekmektedir.\n`;
+        }
+        const allInCurr = (group.allInRow?.satisDoviz || '').trim();
+        if (!allInCurr || allInCurr === 'Satış Dövizi Seçiniz' || allInCurr === 'Satış Döviz') {
+          missingOptions += `"${group.containerType}" konteyneri için Satış Dövizi seçilmedi.\n`;
         }
       } else {
         group.expenses.forEach((exp) => {
           const sellStr = String(exp.satisFiyati ?? '').trim();
           if (sellStr === '' || isNaN(parseFloat(sellStr))) {
             missingOptions += `"${exp.masrafTipi || 'Masraf'}" satırı için satış fiyatı girilmesi gerekmektedir.\n`;
+          }
+          const curr = (exp.satisDoviz || '').trim();
+          if (!curr || curr === 'Satış Dövizi Seçiniz' || curr === 'Satış Döviz') {
+            missingOptions += `"${exp.masrafTipi || 'Masraf'}" satırı için Satış Dövizi seçilmedi.\n`;
+          }
+          const alisParty = String(exp.alisTarafi ?? '').trim();
+          if (!alisParty || alisParty === 'Firma seçiniz' || alisParty === 'Seçiniz') {
+            missingOptions += `"${exp.masrafTipi || 'Masraf'}" satırı için Alış Tarafı firması seçilmeli.\n`;
           }
         });
       }
@@ -1599,21 +2024,31 @@ export function KotasyonTeklifScreen({
         null;
 
       const resolvedLoadingLocationRID =
-        cleanGuidOrUndefined(loadingLocationRid) ||
-        cleanGuidOrUndefined((primaryQuotation as any)?.loadinglocationrid) ||
-        cleanGuidOrUndefined((primaryQuotation as any)?.LOADINGLOCATIONRID) ||
-        cleanGuidOrUndefined((primaryQuotation as any)?.selectedloadinglocationrid) ||
-        cleanGuidOrUndefined(searchParams?.loadingLocationRID) ||
-        cleanGuidOrUndefined(searchParams?.loadingLocationRid) ||
-        null;
+        (yuklemeYeri && yuklemeYeri.trim() !== '') ? (
+          cleanGuidOrUndefined(loadingLocationRid) ||
+          cleanGuidOrUndefined((primaryQuotation as any)?.loadinglocationrid) ||
+          cleanGuidOrUndefined((primaryQuotation as any)?.selectedloadinglocationrid) ||
+          cleanGuidOrUndefined(searchParams?.loadingLocationRID) ||
+          cleanGuidOrUndefined(searchParams?.loadingLocationRid) ||
+          null
+        ) : null;
 
       const resolvedDischargeLocationRID =
-        cleanGuidOrUndefined(dischargeLocationRid) ||
-        cleanGuidOrUndefined((primaryQuotation as any)?.dischargelocationrid) ||
-        cleanGuidOrUndefined((primaryQuotation as any)?.DISCHARGELOCATIONRID) ||
-        cleanGuidOrUndefined(searchParams?.dischargeLocationRID) ||
-        cleanGuidOrUndefined(searchParams?.dischargeLocationRid) ||
-        null;
+        (tahliyeYeri && tahliyeYeri.trim() !== '') ? (
+          cleanGuidOrUndefined(dischargeLocationRid) ||
+          cleanGuidOrUndefined((primaryQuotation as any)?.dischargelocationrid) ||
+          cleanGuidOrUndefined((primaryQuotation as any)?.DISCHARGELOCATIONRID) ||
+          cleanGuidOrUndefined(searchParams?.dischargeLocationRID) ||
+          cleanGuidOrUndefined(searchParams?.dischargeLocationRid) ||
+          null
+        ) : null;
+
+      console.log('[AddOffer PORTS]', {
+        LOADINGLOCATIONRID: resolvedLoadingLocationRID,
+        LOADINGPORTRID: resolvedLoadingPortRID,
+        DISCHARGELOCATIONRID: resolvedDischargeLocationRID,
+        DISCHARGEPORTRID: resolvedDischargePortRID,
+      });
 
       const resolvedLineRid =
         cleanGuidOrUndefined(lineRid) ||
@@ -1654,11 +2089,40 @@ export function KotasyonTeklifScreen({
       });
       const relatedCustomers = Array.from(relatedCustomerSet).join(',') || null;
 
-      // Build containerRids
-      const containerRids = containerGroups
-        .map((g) => g.containerRid)
-        .filter(isGuid)
-        .join(',') || null;
+      // Build containerRids & containerTypes
+      const resolvedContainerRidsList: string[] = [];
+      const resolvedContainerTypesList: string[] = [];
+
+      const containerRidsFromParams: string[] =
+        searchParams?.containerTypeRIDs ||
+        searchParams?.containerTypeRids ||
+        searchParams?.selectedContainerRids ||
+        [];
+
+      containerGroups.forEach((g, idx) => {
+        const cType = g.containerType && String(g.containerType).trim() !== '' ? String(g.containerType).trim() : (searchParams?.konteynerTipi || '40 High Cube');
+        resolvedContainerTypesList.push(cType);
+
+        let cGuid =
+          resolveToContainerGuid(g.containerRid, cType) ||
+          cleanGuidOrUndefined(g.containerRid) ||
+          cleanGuidOrUndefined(containerRidsFromParams[idx]) ||
+          cleanGuidOrUndefined(searchParams?.containerTypeRID) ||
+          cleanGuidOrUndefined(searchParams?.containerTypeRid) ||
+          cleanGuidOrUndefined(searchParams?.containerrid) ||
+          cleanGuidOrUndefined(searchParams?.CONTAINERRID);
+
+        if (!cGuid) {
+          cGuid = 'a992765f-1f8d-4a05-945c-2e621d9ab1a1';
+        }
+
+        resolvedContainerRidsList.push(cGuid);
+      });
+
+      const containerRidsStr = resolvedContainerRidsList.join(',') || null;
+      const containerTypesStr = resolvedContainerTypesList.join(',') || null;
+      const primaryContainerType = resolvedContainerTypesList[0] || (primaryQuotation as any)?.containertype || searchParams?.konteynerTipi || '40 High Cube';
+      const primaryContainerRid = resolvedContainerRidsList[0] || 'a992765f-1f8d-4a05-945c-2e621d9ab1a1';
 
       // Resolve coloader RID
       let coloaderRid: string | null = null;
@@ -1673,24 +2137,43 @@ export function KotasyonTeklifScreen({
         }
       }
 
+      // Resolve default offer sales currency and exchange rate (Issue 5 fix)
+      const mainSalesCurrency =
+        containerGroups[0]?.allInRow?.satisDoviz ||
+        containerGroups[0]?.expenses[0]?.satisDoviz ||
+        'EURO';
+      const mainExchangeRate = convertToUSD(1, mainSalesCurrency);
+
       const addOfferModel: Record<string, any> = {
-        QUOTATIONRID: quotationRID,
+        QUOTATIONRID: quotationRid || null,
         CUSTOMERRID: customerRID,
         LOADINGLOCATIONRID: resolvedLoadingLocationRID,
         LOADINGPORTRID: resolvedLoadingPortRID,
         DISCHARGEPORTRID: resolvedDischargePortRID,
         DISCHARGELOCATIONRID: resolvedDischargeLocationRID,
         LINERID: resolvedLineRid,
+        LINE: hat || searchParams?.hat || null,
+        LINENAME: hat || searchParams?.hat || null,
+        HAT: hat || searchParams?.hat || null,
         WHOADDUSERRID: whoAddUserRid,
         OFFERVALIDITYDATE: teklifGecerlilik || null,
         FREETIME: freeTime || null,
         PAYMENT: odemeTipi || null,
         FILLINGTYPE: dolumTipi || null,
         RELATEDCUSTOMERS: relatedCustomers,
-        CONTAINERRIDS: containerRids,
-        SHIPPINGTYPE: shippingType,
-        COMMERCIALTYPE: commercialType,
-        LOADINGTYPE: loadingType,
+        CONTAINERRIDS: containerRidsStr,
+        CONTAINERTYPES: containerTypesStr,
+        CONTAINERTYPERIDS: containerRidsStr,
+        CONTAINERTYPERID: primaryContainerRid,
+        CONTAINERRID: primaryContainerRid,
+        CONTAINERTYPE: primaryContainerType,
+        CONTAINERTYPESHORT: primaryContainerType,
+        CONTAINERNAME: primaryContainerType,
+        CONTAINER: primaryContainerType,
+        CONTYPE: primaryContainerType,
+        SHIPPINGTYPE: shippingType || 'Denizyolu',
+        COMMERCIALTYPE: isImport ? 'İthalat' : (commercialType || 'İhracat'),
+        LOADINGTYPE: loadingType || 'FCL',
         FLAMMABILITY: yanicilik || null,
         FLAMMABILITYDESCRIPTION: yanicilikAciklama || null,
         LANDTRANSPORTERRID: null,
@@ -1702,12 +2185,28 @@ export function KotasyonTeklifScreen({
         INCOTERM: incoterm && incoterm !== 'Seçiniz' ? incoterm : null,
         LOADERRID: loaderRid,
         COLOADERRID: coloaderRid,
+        OFFERCURRENCY: mainSalesCurrency,
+        CURRENCY: mainSalesCurrency,
+        SATISDOVIZ: mainSalesCurrency,
+        ALLINCURRENCY: mainSalesCurrency,
+        EXCHANGERATE: mainExchangeRate,
+        CURRENCYRATE: mainExchangeRate,
+        RATE: mainExchangeRate,
+        KUR: mainExchangeRate,
       };
 
       // Boş string → null
       Object.keys(addOfferModel).forEach((k) => {
         if (addOfferModel[k] === '') addOfferModel[k] = null;
       });
+
+      console.log('[AddOffer IMPORT]', {
+        isImport,
+        QUOTATIONRID: addOfferModel.QUOTATIONRID,
+        COMMERCIALTYPE: addOfferModel.COMMERCIALTYPE,
+      });
+
+      console.log('[AddOffer BODY]', JSON.stringify(addOfferModel));
 
       // Step 1: AddOffer
       const offerRes = await fetch(`${activeBaseUrl}/Offer/AddOffer`, {
@@ -1752,99 +2251,175 @@ export function KotasyonTeklifScreen({
       }
 
       // Step 2: AddOfferExpenses – iterate container groups
-      let allInCurrency = '';
       for (const group of containerGroups) {
-        const containerTypeRid = cleanGuidOrUndefined(group.containerRid) ?? null;
+        const containerTypeRid =
+          resolveToContainerGuid(group.containerRid, group.containerType) ||
+          cleanGuidOrUndefined(group.containerRid);
 
-        // AllIn summary row first if AllIn checkbox is checked
-        if (group.isAllIn && group.allInRow) {
-          const allInBuyTotal = group.expenses.reduce((acc, e) => {
-            if (e.allIn === 'Hayır') return acc;
-            const qty = parseFloat(String(e.miktar)) || 1;
-            const buy = parseFloat(String(e.alisFiyati)) || 0;
-            return acc + buy * qty;
-          }, 0);
+        console.log('[CONTAINER SAVE]', group.containerType, '→', containerTypeRid);
 
-          const allInExpenseModel: Record<string, any> = {
+        if (!containerTypeRid) {
+          console.warn('[CONTAINER SAVE] Konteyner GUID bulunamadı:', group.containerType);
+        }
+
+        const effectiveContainerRid = containerTypeRid || null;
+        const containerTypeName = group.containerType || primaryContainerType;
+        const isAllIn = !!group.isAllIn;
+
+        // A) Normal masraf satırları
+        for (const exp of group.expenses) {
+          const expenseRid = cleanGuidOrUndefined(exp.id);
+          if (!expenseRid) continue;
+
+          const buyingCurrency = toSiteCurrency(exp.alisDoviz, 'EUR');
+          const buyingCost = toMoneyString(exp.alisFiyati);
+          const sellingCurrency = isAllIn ? null : toSiteCurrency(exp.satisDoviz, exp.alisDoviz);
+          const sellingCost = isAllIn ? null : toMoneyString(exp.satisFiyati);
+
+          const expName = exp.masrafTipi || 'MASRAF';
+          const rowRate = convertToUSD(1, sellingCurrency || buyingCurrency || 'EUR');
+
+          const buyingCustomerRid =
+            cleanGuidOrUndefined(exp.alisTarafiRid) ||
+            cleanGuidOrUndefined(addOfferModel.LOADERRID) ||
+            null;
+
+          const sellingCustomerRid =
+            cleanGuidOrUndefined(exp.satisTarafiRid) ||
+            cleanGuidOrUndefined(searchParams?.customerRID) ||
+            cleanGuidOrUndefined(addOfferModel.CUSTOMERRID) ||
+            null;
+
+          const allInCurr = isAllIn
+            ? toSiteCurrency(group.allInRow?.satisDoviz, 'EUR')
+            : null;
+
+          const expenseBody: Record<string, any> = {
             QUOTATIONRID: addOfferModel.QUOTATIONRID,
             OFFERRID: offerRID,
-            EXPENSERID: null,
-            CONTAINERTYPERID: containerTypeRid,
-            BUYINGCOST: String(allInBuyTotal),
-            BUYINGCURRENCY: group.allInRow.alisDoviz || 'EUR',
-            SELLINGCOST: String(group.allInRow.satisFiyati ?? '0').replace(/\s/g, '').replace(/,/g, '.') || null,
-            SELLINGCURRENCY: group.allInRow.satisDoviz || 'EURO',
-            BEHER: 'CNT',
+            EXPENSERID: expenseRid,
+            CONTAINERTYPERID: effectiveContainerRid,
+            CONTAINERRID: effectiveContainerRid,
+            CONTAINERTYPE: containerTypeName,
+            CONTAINERTYPESHORT: containerTypeName,
+            CONTAINERNAME: containerTypeName,
+            CONTAINER: containerTypeName,
+            EXPENSETYPE: expName,
+            OPTIONLABEL: expName,
+            EXPENSENAME: expName,
+            OPTIONNAME: expName,
+            MASRAFTIPI: expName,
+            DESCRIPTION: expName,
+            BUYINGCOST: buyingCost,
+            BUYINGCURRENCY: buyingCurrency,
+            SELLINGCOST: sellingCost,
+            SELLINGPRICE: sellingCost,
+            SATISFIYATI: sellingCost,
+            SELLINGCURRENCY: sellingCurrency,
+            OFFERCURRENCY: sellingCurrency,
+            CURRENCY: sellingCurrency,
+            SATISDOVIZ: sellingCurrency,
+            BEHER: exp.beher || 'CNT',
+            PIECE: toMoneyString(exp.miktar) || '1',
+            KDV: String(exp.kdv ?? '0'),
+            ISALLIN: isAllIn ? 1 : (exp.allIn === 'Evet' ? 1 : 0),
+            ISALLINHIDE: isAllIn ? 1 : 0,
+            BUYINGCUSTOMERRID: buyingCustomerRid,
+            SELLINGCUSTOMERRID: sellingCustomerRid,
+            WHEREISDESCRIPTION: 1,
+            WHOADDUSERRID: whoAddUserRid,
+            ISADDEDLATER: quotationRid ? (exp.isCustomAdded ? 1 : 0) : 1,
+            EXPENSEFROMTYPE: quotationRid ? (exp.isCustomAdded ? 'OFFER' : 'QUOTATION') : 'OFFER',
+            EXPENSEFROMTYPERID: quotationRid && !exp.isCustomAdded ? quotationRid : offerRID,
+            ALLINCURRENCY: allInCurr,
+            EXCHANGERATE: rowRate,
+            CURRENCYRATE: rowRate,
+            RATE: rowRate,
+            KUR: rowRate,
+          };
+
+          console.log('[AddOfferExpenses ROW]', {
+            masraf: expName,
+            ISALLIN: expenseBody.ISALLIN,
+            ISALLINHIDE: expenseBody.ISALLINHIDE,
+            SELLINGCOST: expenseBody.SELLINGCOST,
+            SELLINGCURRENCY: expenseBody.SELLINGCURRENCY,
+          });
+
+          await fetch(`${activeBaseUrl}/Offer/AddOfferExpenses`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(expenseBody),
+          }).catch(() => null);
+        }
+
+        // B) All-In özet satırı (site mantığı)
+        if (isAllIn && group.allInRow) {
+          const allInExpenseRid =
+            cleanGuidOrUndefined(group.allInRow.expenseRid) ||
+            'd0b969ed-b4a5-4059-b1bd-4606bb8df7d6'; // ALLIN masraf tipi RID
+
+          const totalBuy = group.expenses.reduce((acc, e) => {
+            const qty = parseFloat(toMoneyString(e.miktar)) || 1;
+            return acc + (parseFloat(toMoneyString(e.alisFiyati)) || 0) * qty;
+          }, 0);
+
+          const allInSell = toMoneyString(group.allInRow.satisFiyati);
+          const allInCurr = toSiteCurrency(group.allInRow.satisDoviz, 'EUR');
+          const allInRate = convertToUSD(1, allInCurr);
+          const allInExpenseType = group.allInRow.masrafTipi || 'HERŞEY DAHİL TAŞIMA FİYATI';
+
+          const allInBody: Record<string, any> = {
+            QUOTATIONRID: addOfferModel.QUOTATIONRID,
+            OFFERRID: offerRID,
+            EXPENSERID: allInExpenseRid,
+            CONTAINERTYPERID: effectiveContainerRid,
+            CONTAINERRID: effectiveContainerRid,
+            CONTAINERTYPE: containerTypeName,
+            CONTAINERTYPESHORT: containerTypeName,
+            CONTAINERNAME: containerTypeName,
+            CONTAINER: containerTypeName,
+            EXPENSETYPE: allInExpenseType,
+            OPTIONLABEL: allInExpenseType,
+            EXPENSENAME: allInExpenseType,
+            OPTIONNAME: allInExpenseType,
+            MASRAFTIPI: allInExpenseType,
+            DESCRIPTION: allInExpenseType,
+            BUYINGCOST: String(totalBuy),
+            BUYINGCURRENCY: allInCurr,
+            SELLINGCOST: allInSell,
+            SELLINGPRICE: allInSell,
+            SATISFIYATI: allInSell,
+            SELLINGCURRENCY: allInCurr,
+            OFFERCURRENCY: allInCurr,
+            CURRENCY: allInCurr,
+            SATISDOVIZ: allInCurr,
+            BEHER: null,
             PIECE: '1',
             KDV: '0',
             ISALLIN: 1,
             ISALLINHIDE: 0,
             BUYINGCUSTOMERRID: null,
-            SELLINGCUSTOMERRID: cleanGuidOrUndefined(group.allInRow.satisTarafi) ?? addOfferModel.CUSTOMERRID,
+            SELLINGCUSTOMERRID: cleanGuidOrUndefined(searchParams?.customerRID) || addOfferModel.CUSTOMERRID || null,
             WHEREISDESCRIPTION: 0,
-            WHOADDUSERRID: addOfferModel.WHOADDUSERRID,
-            ALLINCURRENCY: group.allInRow.satisDoviz || 'EURO',
+            WHOADDUSERRID: whoAddUserRid,
+            ALLINCURRENCY: allInCurr,
             ISADDEDLATER: 0,
             EXPENSEFROMTYPE: 'ALLIN',
             EXPENSEFROMTYPERID: null,
-          };
-          allInCurrency = group.allInRow.satisDoviz || 'EURO';
-          Object.keys(allInExpenseModel).forEach((k) => {
-            if (allInExpenseModel[k] === '') allInExpenseModel[k] = null;
-          });
-
-          const expRes = await fetch(`${activeBaseUrl}/Offer/AddOfferExpenses`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(allInExpenseModel),
-          }).catch(() => null);
-
-          if (expRes) {
-            const expText = await expRes.text();
-            console.log('[AddOfferExpenses ALLIN]', group.containerType, expRes.status, expText);
-          }
-        }
-
-        // Regular expense rows
-        for (const exp of group.expenses) {
-          const expenseBody: Record<string, any> = {
-            QUOTATIONRID: addOfferModel.QUOTATIONRID,
-            OFFERRID: offerRID,
-            EXPENSERID: cleanGuidOrUndefined(exp.id) ?? null,
-            CONTAINERTYPERID: containerTypeRid,
-            BUYINGCOST: String(exp.alisFiyati ?? '0').replace(/\s/g, '').replace(/,/g, '.'),
-            BUYINGCURRENCY: exp.alisDoviz || 'EUR',
-            SELLINGCOST: String(exp.satisFiyati ?? '0').replace(/\s/g, '').replace(/,/g, '.') || null,
-            SELLINGCURRENCY: exp.satisDoviz || 'EURO',
-            BEHER: exp.beher || 'CNT',
-            PIECE: String(exp.miktar ?? '1'),
-            KDV: String(exp.kdv ?? '0'),
-            ISALLIN: exp.allIn === 'Evet' ? 1 : 0,
-            ISALLINHIDE: 0,
-            BUYINGCUSTOMERRID: cleanGuidOrUndefined(exp.alisTarafi) ?? null,
-            SELLINGCUSTOMERRID: cleanGuidOrUndefined(exp.satisTarafi) ?? addOfferModel.CUSTOMERRID,
-            WHEREISDESCRIPTION: 1,
-            WHOADDUSERRID: addOfferModel.WHOADDUSERRID,
-            ALLINCURRENCY: null,
-            ISADDEDLATER: exp.isCustomAdded ? 1 : 0,
-            EXPENSEFROMTYPE: 'QUOTATION',
-            EXPENSEFROMTYPERID: addOfferModel.QUOTATIONRID,
+            EXCHANGERATE: allInRate,
+            CURRENCYRATE: allInRate,
+            RATE: allInRate,
+            KUR: allInRate,
           };
 
-          Object.keys(expenseBody).forEach((k) => {
-            if (expenseBody[k] === '') expenseBody[k] = null;
-          });
+          console.log('[ALLIN BODY]', allInBody);
 
-          const expRes = await fetch(`${activeBaseUrl}/Offer/AddOfferExpenses`, {
+          await fetch(`${activeBaseUrl}/Offer/AddOfferExpenses`, {
             method: 'POST',
             headers,
-            body: JSON.stringify(expenseBody),
+            body: JSON.stringify(allInBody),
           }).catch(() => null);
-
-          if (expRes) {
-            const expText = await expRes.text();
-            console.log('[AddOfferExpenses]', group.containerType, exp.masrafTipi, expRes.status, expText);
-          }
         }
       }
 
@@ -1853,6 +2428,22 @@ export function KotasyonTeklifScreen({
       setIsOfferCreated(true);
       setOfferRidState(offerRID);
       setIsViewMode(true);
+
+      // Verification check after AddOfferExpenses
+      try {
+        const checkRes = await fetch(`${activeBaseUrl}/Offer/GetOfferExpensesWithRid`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ offerrid: offerRID, OFFERRID: offerRID }),
+        }).catch(() => null);
+
+        if (checkRes && checkRes.ok) {
+          const checkData = await checkRes.json().catch(() => null);
+          console.log('[SAVED EXPENSES]', JSON.stringify(checkData).slice(0, 2000));
+        }
+      } catch (checkErr) {
+        console.log('[SAVED EXPENSES ERR]', checkErr);
+      }
 
       // Fetch created offer details via GetOfferWithRid to populate view fields
       try {
@@ -1888,6 +2479,30 @@ export function KotasyonTeklifScreen({
                 yukleyici
               );
               if (reloadedGroups.length > 0) {
+                // Merge any custom added expenses from pre-submit containerGroups into reloadedGroups
+                containerGroups.forEach((oldGroup) => {
+                  const customExps = oldGroup.expenses.filter((e) => e.isCustomAdded);
+                  if (customExps.length > 0) {
+                    const targetGroup =
+                      reloadedGroups.find(
+                        (rg) => rg.containerType.toLowerCase() === oldGroup.containerType.toLowerCase()
+                      ) || reloadedGroups[0];
+                    if (targetGroup) {
+                      customExps.forEach((cExp) => {
+                        const exists = targetGroup.expenses.some(
+                          (re) =>
+                            re.id === cExp.id ||
+                            (re.masrafTipi.toLowerCase() === cExp.masrafTipi.toLowerCase() &&
+                              String(re.alisFiyati) === String(cExp.alisFiyati))
+                        );
+                        if (!exists) {
+                          targetGroup.expenses.push(cExp);
+                        }
+                      });
+                    }
+                  }
+                });
+
                 setContainerGroups(reloadedGroups);
               }
             }
@@ -2102,15 +2717,15 @@ export function KotasyonTeklifScreen({
                   })}
                 </View>
 
-                {/* ROW 12: Tehlikelilik | (Boş) */}
+                {/* ROW 12: Tehlikelilik | Yanıcılık Açıklama */}
                 <View style={styles.gridRow}>
                   {renderDesignItem({
                     label: 'Tehlikelilik',
                     value: yanicilik || 'Yanıcısız',
                   })}
                   {renderDesignItem({
-                    label: '',
-                    value: '',
+                    label: 'Yanıcılık Açıklama',
+                    value: yanicilikAciklama || '—',
                   })}
                 </View>
 
@@ -2157,7 +2772,10 @@ export function KotasyonTeklifScreen({
                         title: 'Hat Seçiniz',
                         type: 'hat',
                         placeholder: 'Hat adı veya kodu ile canlı arayın...',
-                        onSelect: (opt) => setHat(opt.name),
+                        onSelect: (opt) => {
+                          setHat(opt.name);
+                          setLineRid(opt.id);
+                        },
                       }),
                   })}
                   {renderDesignItem({
@@ -2224,7 +2842,10 @@ export function KotasyonTeklifScreen({
                         title: 'Yükleme Yeri Seçiniz',
                         type: 'location',
                         placeholder: 'Yükleme yeri / şehir / bölge arayın...',
-                        onSelect: (opt) => setYuklemeYeri(opt.name),
+                        onSelect: (opt) => {
+                          setYuklemeYeri(opt.name);
+                          setLoadingLocationRid(opt.id);
+                        },
                       }),
                     placeholder: '--',
                   })}
@@ -2238,7 +2859,10 @@ export function KotasyonTeklifScreen({
                         title: 'Yükleme Limanı Seçiniz',
                         type: 'port',
                         placeholder: 'Yükleme limanı arayın...',
-                        onSelect: (opt) => setYuklemeLimani(opt.name),
+                        onSelect: (opt) => {
+                          setYuklemeLimani(opt.name);
+                          setLoadingPortRid(opt.id);
+                        },
                       }),
                     placeholder: 'Yükleme limanı seçiniz',
                   })}
@@ -2256,7 +2880,10 @@ export function KotasyonTeklifScreen({
                         title: 'Tahliye Yeri Seçiniz',
                         type: 'location',
                         placeholder: 'Tahliye yeri / şehir / bölge arayın...',
-                        onSelect: (opt) => setTahliyeYeri(opt.name),
+                        onSelect: (opt) => {
+                          setTahliyeYeri(opt.name);
+                          setDischargeLocationRid(opt.id);
+                        },
                       }),
                     placeholder: '--',
                   })}
@@ -2270,7 +2897,10 @@ export function KotasyonTeklifScreen({
                         title: 'Tahliye Limanı Seçiniz',
                         type: 'port',
                         placeholder: 'Tahliye limanı arayın...',
-                        onSelect: (opt) => setTahliyeLimani(opt.name),
+                        onSelect: (opt) => {
+                          setTahliyeLimani(opt.name);
+                          setDischargePortRid(opt.id);
+                        },
                       }),
                     placeholder: 'Tahliye limanı seçiniz',
                   })}
@@ -2333,6 +2963,29 @@ export function KotasyonTeklifScreen({
                         placeholder: 'Co-Loader / firma arayın...',
                         onSelect: (opt) => setCoLoader(opt.name),
                       }),
+                  })}
+                </View>
+
+                {/* ROW 9: Tehlikelilik : | Yanıcılık Açıklama : */}
+                <View style={styles.gridRow}>
+                  {renderDesignItem({
+                    label: 'Tehlikelilik :',
+                    value: yanicilik || 'Yanıcısız',
+                    isEditable: true,
+                    onPress: () =>
+                      setActivePickerModal({
+                        title: 'Tehlikelilik Durumu Seçiniz',
+                        options: ['Yanıcılı', 'Yanıcısız'],
+                        selected: yanicilik || 'Yanıcısız',
+                        onSelect: setYanicilik,
+                      }),
+                  })}
+                  {renderDesignItem({
+                    label: 'Yanıcılık Açıklama :',
+                    value: yanicilikAciklama,
+                    isEditable: true,
+                    onChangeText: setYanicilikAciklama,
+                    placeholder: yanicilik === 'Yanıcılı' ? 'Yanıcılık açıklaması giriniz' : 'Açıklama giriniz',
                   })}
                 </View>
               </>
@@ -2418,8 +3071,9 @@ export function KotasyonTeklifScreen({
                 <View style={styles.tableHeaderRow}>
                   <View style={[styles.thCell, { width: 75 }]}>
                     <Pressable
-                      onPress={() => handleToggleAllInGroup(group.containerRid, !group.isAllIn)}
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+                      disabled={isViewMode}
+                      onPress={() => !isViewMode && handleToggleAllInGroup(group.containerRid, !group.isAllIn)}
+                      style={[{ flexDirection: 'row', alignItems: 'center', gap: 4, cursor: 'pointer' }, isViewMode && { opacity: 0.6 }]}
                     >
                       <ThemedText style={styles.thText}>All In</ThemedText>
                       <ThemedText style={{ fontSize: 14, color: group.isAllIn ? '#2563eb' : '#434343' }}>
@@ -2514,8 +3168,51 @@ export function KotasyonTeklifScreen({
                               setExpenseSearchModal({
                                 visible: true,
                                 title: 'Masraf Kalemi / Tipi Seçiniz',
-                                onSelect: (opt) =>
-                                  handleUpdateExpense(group.containerRid, exp.id, 'masrafTipi', opt.name),
+                                onSelect: async (opt) => {
+                                  const targetExpId = exp.id;
+                                  let autoKdv =
+                                    opt.kdv !== undefined && opt.kdv !== null && String(opt.kdv) !== ''
+                                      ? String(opt.kdv)
+                                      : getAutoKdvForExpense(opt.name);
+
+                                  let masrafName = opt.name;
+                                  let unitName = undefined;
+
+                                  const expRid = cleanGuidOrUndefined(opt.id);
+                                  if (expRid) {
+                                    const info = await fetchExpenseInfo(expRid, activeBaseUrl, authToken);
+                                    if (info) {
+                                      if (info.kdv !== undefined && !isNaN(info.kdv)) {
+                                        autoKdv = String(info.kdv);
+                                      }
+                                      if (info.masraf) {
+                                        masrafName = info.masraf;
+                                      }
+                                      if (info.unitname) {
+                                        unitName = info.unitname;
+                                      }
+                                    }
+                                  }
+
+                                  setContainerGroups((prev) =>
+                                    prev.map((g) => {
+                                      if (g.containerRid !== group.containerRid) return g;
+                                      return {
+                                        ...g,
+                                        expenses: g.expenses.map((e) => {
+                                          if (e.id !== targetExpId) return e;
+                                          return {
+                                            ...e,
+                                            id: expRid || e.id,
+                                            masrafTipi: masrafName,
+                                            kdv: autoKdv,
+                                            beher: unitName || e.beher,
+                                          };
+                                        }),
+                                      };
+                                    })
+                                  );
+                                },
                               })
                             }
                             style={[styles.cellDropdown, isRowLocked && { opacity: 0.5, backgroundColor: '#f1f5f9' }]}
@@ -2603,7 +3300,7 @@ export function KotasyonTeklifScreen({
                             onPress={() =>
                               setActivePickerModal({
                                 title: 'Alış Döviz Seçimi',
-                                options: ['EUR', 'USD', 'GBP'],
+                                options: ['EUR', 'USD', 'GBP', 'TL'],
                                 selected: exp.alisDoviz,
                                 onSelect: (val) =>
                                   handleUpdateExpense(group.containerRid, exp.id, 'alisDoviz', val),
@@ -2632,8 +3329,12 @@ export function KotasyonTeklifScreen({
                               setLoaderSearchModal({
                                 visible: true,
                                 title: 'Alış Tarafı Seçiniz',
-                                onSelect: (opt) =>
-                                  handleUpdateExpense(group.containerRid, exp.id, 'alisTarafi', opt.name),
+                                onSelect: (opt) => {
+                                  handleUpdateExpense(group.containerRid, exp.id, 'alisTarafi', opt.name);
+                                  if (isGuid(opt.id)) {
+                                    handleUpdateExpense(group.containerRid, exp.id, 'alisTarafiRid', opt.id);
+                                  }
+                                },
                               })
                             }
                             style={[styles.cellDropdown, isRowLocked && { opacity: 0.5, backgroundColor: '#f1f5f9' }]}
@@ -2678,13 +3379,18 @@ export function KotasyonTeklifScreen({
                               options: SATIS_CURRENCY_OPTIONS,
                               selected: exp.satisDoviz,
                               onSelect: (val) =>
-                                handleUpdateExpense(group.containerRid, exp.id, 'satisDoviz', val),
+                                handleUpdateExpense(
+                                  group.containerRid,
+                                  exp.id,
+                                  'satisDoviz',
+                                  normalizeSellCurrency(val, exp.alisDoviz)
+                                ),
                             })
                           }
                           style={[styles.cellDropdown, isRowLocked && { opacity: 0.5, backgroundColor: '#f1f5f9' }]}
                         >
-                          <ThemedText style={styles.cellDropdownText}>
-                            {exp.satisDoviz}
+                          <ThemedText style={styles.cellDropdownText} numberOfLines={1}>
+                            {exp.satisDoviz || normalizeSellCurrency('', exp.alisDoviz)}
                           </ThemedText>
                           <ThemedText style={styles.dropdownArrowSmall}>▼</ThemedText>
                         </Pressable>
@@ -2693,23 +3399,16 @@ export function KotasyonTeklifScreen({
                       {/* Kar */}
                       <View style={[styles.tdCell, { width: 75 }]}>
                         {(() => {
-                          if (profitVal === 'NaN') {
-                            return <ThemedText style={styles.profitText}>NaN</ThemedText>;
-                          }
-                          const valNum = parseFloat(profitVal);
-                          const isNeg = valNum < 0;
-                          const isPos = valNum > 0;
-                          const formatted = `${isNeg ? '-' : (isPos ? '+' : '')}${Math.abs(valNum).toFixed(2)} $`;
-
+                          const { text, num } = rowProfitStr(exp);
                           return (
                             <ThemedText
                               style={[
                                 styles.profitText,
-                                isNeg && styles.profitNegative,
-                                isPos && styles.profitPositive,
+                                num < 0 && styles.profitNegative,
+                                num > 0 && styles.profitPositive,
                               ]}
                             >
-                              {formatted}
+                              {text}
                             </ThemedText>
                           );
                         })()}
@@ -2787,6 +3486,7 @@ export function KotasyonTeklifScreen({
                     {/* Column 2: Masraf Tipi - Live Expense Select2 */}
                     <View style={[styles.tdCell, { width: 220 }]}>
                       <Pressable
+                        disabled={isViewMode}
                         onPress={() =>
                           setExpenseSearchModal({
                             visible: true,
@@ -2795,7 +3495,7 @@ export function KotasyonTeklifScreen({
                               handleUpdateAllInRow(group.containerRid, 'masrafTipi', opt.name),
                           })
                         }
-                        style={styles.cellDropdown}
+                        style={[styles.cellDropdown, isViewMode && { opacity: 0.6, backgroundColor: '#cbd5e1' }]}
                       >
                         <ThemedText style={[styles.cellDropdownText, { fontWeight: '700' }]} numberOfLines={1}>
                           {group.allInRow?.masrafTipi || 'HERŞEY DAHİL TAŞIMA FİYATI'}
@@ -2834,16 +3534,17 @@ export function KotasyonTeklifScreen({
                     {/* Column 6: Alış Döviz */}
                     <View style={[styles.tdCell, { width: 90 }]}>
                       <Pressable
+                        disabled={isViewMode}
                         onPress={() =>
                           setActivePickerModal({
                             title: 'Alış Döviz Seçimi',
-                            options: ['EUR', 'USD', 'GBP'],
+                            options: ['EUR', 'USD', 'GBP', 'TL'],
                             selected: group.allInRow?.alisDoviz || 'EUR',
                             onSelect: (val) =>
                               handleUpdateAllInRow(group.containerRid, 'alisDoviz', val),
                           })
                         }
-                        style={styles.cellDropdown}
+                        style={[styles.cellDropdown, isViewMode && { opacity: 0.6, backgroundColor: '#cbd5e1' }]}
                       >
                         <ThemedText style={styles.cellDropdownText}>
                           {group.allInRow?.alisDoviz || 'Alış Döviz'}
@@ -2858,7 +3559,11 @@ export function KotasyonTeklifScreen({
                     {/* Column 8: Satış Fiyatı */}
                     <View style={[styles.tdCell, { width: 100 }]}>
                       <TextInput
-                        style={styles.cellTextInputRightHighlight}
+                        editable={!isViewMode}
+                        style={[
+                          styles.cellTextInputRightHighlight,
+                          isViewMode && { backgroundColor: '#cbd5e1', color: '#475569' },
+                        ]}
                         value={group.allInRow?.satisFiyati || ''}
                         placeholder="Satış Fiyatı"
                         placeholderTextColor="#94a3b8"
@@ -2872,19 +3577,24 @@ export function KotasyonTeklifScreen({
                     {/* Column 9: Satış Döviz */}
                     <View style={[styles.tdCell, { width: 95 }]}>
                       <Pressable
+                        disabled={isViewMode}
                         onPress={() =>
                           setActivePickerModal({
                             title: 'Satış Döviz Seçimi',
                             options: SATIS_CURRENCY_OPTIONS,
-                            selected: group.allInRow?.satisDoviz || 'EURO',
+                            selected: group.allInRow?.satisDoviz || 'EUR',
                             onSelect: (val) =>
-                              handleUpdateAllInRow(group.containerRid, 'satisDoviz', val),
+                              handleUpdateAllInRow(
+                                group.containerRid,
+                                'satisDoviz',
+                                val
+                              ),
                           })
                         }
-                        style={styles.cellDropdown}
+                        style={[styles.cellDropdown, isViewMode && { opacity: 0.6, backgroundColor: '#cbd5e1' }]}
                       >
-                        <ThemedText style={styles.cellDropdownText}>
-                          {group.allInRow?.satisDoviz || 'Satış Döviz'}
+                        <ThemedText style={styles.cellDropdownText} numberOfLines={1}>
+                          {group.allInRow?.satisDoviz || 'EUR'}
                         </ThemedText>
                         <ThemedText style={styles.dropdownArrowSmall}>▼</ThemedText>
                       </Pressable>

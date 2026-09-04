@@ -1,4 +1,4 @@
-import { Platform, ScrollView, StatusBar, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Platform, ScrollView, StatusBar, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { LoginCard } from '@/components/login-card';
@@ -11,10 +11,18 @@ import { useTheme } from '@/hooks/use-theme';
 
 // Auth durumuna göre ekranı seçen iç bileşen
 function HomeScreenContent() {
-  const { isLoggedIn } = useAuth();
+  const { isLoggedIn, isLoading } = useAuth();
   const safeAreaInsets = useSafeAreaInsets();
   const theme = useTheme();
   const responsive = useResponsive();
+
+  if (isLoading) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#ffffff' }}>
+        <ActivityIndicator size="large" color="#1d72f3" />
+      </View>
+    );
+  }
 
   if (isLoggedIn) {
     return <MainDashboard />;

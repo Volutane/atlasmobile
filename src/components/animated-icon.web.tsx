@@ -5,7 +5,12 @@ import Animated, { Keyframe, Easing } from 'react-native-reanimated';
 import classes from './animated-icon.module.css';
 const DURATION = 300;
 
-export function AnimatedSplashOverlay() {
+import { useEffect } from 'react';
+
+export function AnimatedSplashOverlay({ onFinish }: { onFinish?: () => void }) {
+  useEffect(() => {
+    if (onFinish) onFinish();
+  }, [onFinish]);
   return null;
 }
 

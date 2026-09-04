@@ -149,6 +149,7 @@ export function TeklifOlusturmaScreen({
 
   const isKonteynerVisible =
     isIthalat ||
+    kotasyonKullanimi === 'Hayır' ||
     (!isDenizyolu &&
       (lowerTasima.includes('demiryolu') ||
         lowerTasima.includes('karayolu') ||
@@ -172,6 +173,15 @@ export function TeklifOlusturmaScreen({
     if (isIthalat) {
       setKotasyonKullanimi('Hayır');
       setKonteynerOptions(DEMIRYOLU_CONTAINER_OPTIONS);
+    } else if (kotasyonKullanimi === 'Hayır') {
+      const lower = tasimaTipi.toLowerCase();
+      if (lower.includes('karayolu') || lower.includes('road')) {
+        setKonteynerOptions(KARAYOLU_VEHICLE_OPTIONS);
+      } else if (lower.includes('havayolu') || lower.includes('air')) {
+        setKonteynerOptions(HAVAYOLU_CONTAINER_OPTIONS);
+      } else {
+        setKonteynerOptions(DEMIRYOLU_CONTAINER_OPTIONS);
+      }
     } else if (!isKonteynerVisible) {
       setKonteynerTipi('');
       setSelectedKonteynerler([]);
@@ -187,7 +197,7 @@ export function TeklifOlusturmaScreen({
         setKonteynerOptions(DEMIRYOLU_CONTAINER_OPTIONS);
       }
     }
-  }, [tasimaTipi, ticariTipi, isKonteynerVisible, isIthalat]);
+  }, [tasimaTipi, ticariTipi, isKonteynerVisible, isIthalat, kotasyonKullanimi]);
 
   const handleDevamEt = async () => {
     setApiError(null);
@@ -470,11 +480,11 @@ export function TeklifOlusturmaScreen({
               {isKonteynerVisible ? (
                 <View style={styles.fieldGroup}>
                   <ThemedText style={styles.fieldLabel}>
-                    Konteyner Tipi Seçiniz {isIthalat ? '(Çoklu Seçim)' : ''}
+                    Konteyner Tipi Seçiniz {(isIthalat || kotasyonKullanimi === 'Hayır') ? '(Çoklu Seçim)' : ''}
                   </ThemedText>
                   <Pressable
                     onPress={() => {
-                      const opts = isIthalat ? DEMIRYOLU_CONTAINER_OPTIONS : konteynerOptions;
+                      const opts = (isIthalat || kotasyonKullanimi === 'Hayır') ? (konteynerOptions.length > 0 ? konteynerOptions : DEMIRYOLU_CONTAINER_OPTIONS) : konteynerOptions;
                       setActivePicker({
                         title: 'Konteyner Tipi Seçiniz',
                         options: opts,

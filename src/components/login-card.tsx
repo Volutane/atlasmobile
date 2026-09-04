@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -16,15 +16,26 @@ import { useResponsive } from '@/hooks/use-responsive';
 
 export function LoginCard() {
   const responsive = useResponsive();
-  const { login: authLogin } = useAuth();
-  const [username, setUsername] = useState<string>('');
-  const [password, setPassword] = useState<string>('');
-  const [rememberMe, setRememberMe] = useState<boolean>(true);
+  const {
+    login: authLogin,
+    savedUsername,
+    savedPassword,
+    rememberMe: storedRememberMe,
+  } = useAuth();
+  const [username, setUsername] = useState<string>(savedUsername || '');
+  const [password, setPassword] = useState<string>(savedPassword || '');
+  const [rememberMe, setRememberMe] = useState<boolean>(storedRememberMe ?? true);
   const [loading, setLoading] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [statusType, setStatusType] = useState<'success' | 'error' | null>(null);
   const [userToken, setUserToken] = useState<string | null>(null);
   const [userData, setUserData] = useState<any | null>(null);
+
+  useEffect(() => {
+    if (savedUsername && !username) setUsername(savedUsername);
+    if (savedPassword && !password) setPassword(savedPassword);
+    if (typeof storedRememberMe === 'boolean') setRememberMe(storedRememberMe);
+  }, [savedUsername, savedPassword, storedRememberMe]);
 
 
 
@@ -118,7 +129,7 @@ export function LoginCard() {
         setStatusMessage(json.message || 'Giriş başarılı!');
         setStatusType('success');
 
-        authLogin(userPayload, extractedToken, cleanBaseUrl);
+        authLogin(userPayload, extractedToken, cleanBaseUrl, rememberMe, password);
       } else {
         setStatusMessage('Kullanıcı adı veya şifre hatalı. Lütfen bilgilerinizi kontrol ediniz.');
         setStatusType('error');

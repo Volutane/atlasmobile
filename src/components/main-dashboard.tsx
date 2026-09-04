@@ -27,6 +27,7 @@ import { TeklifOlusturmaScreen } from '@/components/teklif-olusturma';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CariYonetimiScreen } from './cari-yonetimi';
 import { MusteriKartiScreen } from './musteri-karti';
+import { SistemAyarlariScreen } from './sistem-ayarlari';
 
 
 import { ThemedText } from '@/components/themed-text';
@@ -114,6 +115,7 @@ export function MainDashboard() {
   const [isCariYonetimiOpen, setIsCariYonetimiOpen] = useState<boolean>(false);
   const [isCariCreateOpen, setIsCariCreateOpen] = useState<boolean>(false);
   const [isMusteriKartiOpen, setIsMusteriKartiOpen] = useState<boolean>(false);
+  const [isSistemAyarlariOpen, setIsSistemAyarlariOpen] = useState<boolean>(false);
   const [selectedCustomerData, setSelectedCustomerData] = useState<any>(null);
 
   const toggleSection = (sectionKey: string) => {
@@ -1216,6 +1218,14 @@ export function MainDashboard() {
           setIsKotasyonTeklifOpen(false);
           setIsKotasyonSearchOpen(true);
         }}
+      />
+    );
+  }
+
+  if (isSistemAyarlariOpen) {
+    return (
+      <SistemAyarlariScreen
+        onClose={() => setIsSistemAyarlariOpen(false)}
       />
     );
   }
@@ -3055,17 +3065,17 @@ export function MainDashboard() {
                     </View>
                   </View>
 
-                  <View style={[styles.userMenuItem, styles.disabledMenuItem]}>
+                  <Pressable
+                    onPress={() => {
+                      setIsUserModalOpen(false);
+                      setIsSistemAyarlariOpen(true);
+                    }}
+                    style={({ pressed }) => [styles.userMenuItem, pressed && styles.pressed]}>
                     <View style={{ flex: 1 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <ThemedText style={styles.userMenuItemTitle}>Sistem Ayarları</ThemedText>
-                        <View style={styles.soonBadge}>
-                          <ThemedText style={styles.soonBadgeText}>YAKINDA</ThemedText>
-                        </View>
-                      </View>
+                      <ThemedText style={styles.userMenuItemTitle}>Sistem Ayarları</ThemedText>
                       <ThemedText style={styles.userMenuItemSub}>Görünüm, tema ve dil tercihleri</ThemedText>
                     </View>
-                  </View>
+                  </Pressable>
 
                   <View style={[styles.userMenuItem, styles.disabledMenuItem]}>
                     <View style={{ flex: 1 }}>
@@ -3103,6 +3113,7 @@ export function MainDashboard() {
         onLogout={logout}
         onOpenCariYonetimi={() => setIsCariYonetimiOpen(true)}
         onOpenCariCreate={() => setIsCariCreateOpen(true)}
+        onOpenSystemSettings={() => setIsSistemAyarlariOpen(true)}
       />
     </View>
   );

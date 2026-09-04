@@ -23,6 +23,21 @@ import {
   QuotationForCreateOfferSearchModel
 } from '@/types/quotation';
 
+export function isImportCommercialType(...values: any[]): boolean {
+  for (const val of values) {
+    if (!val) continue;
+    const str = String(val)
+      .replace(/İ/g, 'i')
+      .replace(/I/g, 'i')
+      .toLowerCase()
+      .replace(/\u0307/g, '');
+    if (str.includes('ithal') || str.includes('import')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Derinlemesine tüm key'leri küçük harfe çevirir (array + nested object destekli)
 function normalizeKeysDeep<T = any>(input: any): T {
   if (Array.isArray(input)) {
@@ -98,17 +113,22 @@ export interface KotasyonAramaValues {
   flammability?: string;
   yukleyici?: string;
   loaderRID?: string;
+  loaderRid?: string;
   customerRID?: string;
   customerRid?: string;
   customerName?: string;
   yuklemeYeri?: string;
   loadingLocationRID?: string;
+  loadingLocationRid?: string;
   yuklemeLimani?: string;
   loadingPortRID?: string;
+  loadingPortRid?: string;
   teslimYeri?: string;
   dischargeLocationRID?: string;
+  dischargeLocationRid?: string;
   teslimLimani?: string;
   dischargePortRID?: string;
+  dischargePortRid?: string;
 }
 
 export interface KotasyonAramaProps {
@@ -126,6 +146,7 @@ export interface OptionItem {
   id: string;
   name: string;
   shortName?: string;
+  kdv?: string | number;
 }
 
 export const SABIT_ODEME_TIPI_OPTIONS: OptionItem[] = [
@@ -241,6 +262,15 @@ function normalizeOptionItem(item: any): OptionItem {
     ciGet(
       norm,
       'rid',
+      'expenserid',
+      'expense_rid',
+      'expensetyperid',
+      'expensetype_rid',
+      'costrid',
+      'containerrid',
+      'container_rid',
+      'containertype_rid',
+      'containertypeid',
       'linerid',
       'locationrid',
       'cityrid',
@@ -256,6 +286,21 @@ function normalizeOptionItem(item: any): OptionItem {
   // Extract Base Name (Prioritize hatadi, linename, customername, loadername, unvan, text, name, label)
   let baseName = ciGet(
     norm,
+    'expensename',
+    'expense_name',
+    'expensetype',
+    'expense_type',
+    'optionlabel',
+    'optionname',
+    'masraf',
+    'masrafadi',
+    'masraf_adi',
+    'masrafing',
+    'containertype',
+    'containertypeshort',
+    'container_type',
+    'containername',
+    'containertypename',
     'hatadi',
     'hat_adi',
     'hatname',
@@ -349,10 +394,13 @@ function normalizeOptionItem(item: any): OptionItem {
     displayName += ` (${String(fullCode).trim()})`;
   }
 
+  const kdvVal = ciGet(norm, 'kdv', 'expensekdv', 'vat', 'tax');
+
   return {
     id: String(id),
     name: displayName,
     shortName: fullCode ? String(fullCode) : undefined,
+    kdv: kdvVal !== undefined ? String(kdvVal) : undefined,
   };
 }
 
@@ -360,7 +408,7 @@ function normalizeOptionItem(item: any): OptionItem {
 let globalPortCache: OptionItem[] | null = null;
 let globalPortCachePromise: Promise<OptionItem[]> | null = null;
 
-async function getOrFetchAllPorts(baseUrl: string, token: string): Promise<OptionItem[]> {
+export async function getOrFetchAllPorts(baseUrl: string, token: string): Promise<OptionItem[]> {
   if (globalPortCache && globalPortCache.length > 0) {
     return globalPortCache;
   }
@@ -406,7 +454,7 @@ async function getOrFetchAllPorts(baseUrl: string, token: string): Promise<Optio
   return globalPortCachePromise;
 }
 
-let globalContainerMap: Record<string, string> = {};
+export let globalContainerMap: Record<string, string> = {};
 
 async function prefetchRealContainerRIDs(baseUrl: string, token: string): Promise<Record<string, string>> {
   if (Object.keys(globalContainerMap).length > 0) return globalContainerMap;
@@ -419,7 +467,7 @@ async function prefetchRealContainerRIDs(baseUrl: string, token: string): Promis
       headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
     }
 
-    const queries = ['a', '20', '40', 'e', 'o'];
+    const queries = ['a', 'e', 'o', '20', '40', '45', 'reefer', 'open', 'flat', 'tank', 'high', 'iso', 'pallet'];
     for (const q of queries) {
       const res = await fetch(`${baseUrl}/Select2/GetValueForContainerSelect2Search?SELECT2SEARCHVAL=${encodeURIComponent(q)}`, {
         method: 'GET',
@@ -443,6 +491,80 @@ async function prefetchRealContainerRIDs(baseUrl: string, token: string): Promis
     console.log('[CONTAINER PREFETCH] Container RIDs fetch error:', err?.message);
   }
   return globalContainerMap;
+}
+
+async function resolveContainerRid(
+  item: OptionItem,
+  baseUrl: string,
+  token: string
+): Promise<string | undefined> {
+  // 1) Zaten GUID ise
+  if (isGuid(item.id)) return item.id.trim();
+
+  // 2) Cache
+  const nameKey = (item.name || '').trim().toLowerCase();
+  const shortKey = (item.shortName || '').trim().toLowerCase();
+  if (globalContainerMap[nameKey]) return globalContainerMap[nameKey];
+  if (shortKey && globalContainerMap[shortKey]) return globalContainerMap[shortKey];
+
+  // 3) Select2 ile isimden ara
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+  };
+  if (token) {
+    headers.Authorization = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+  }
+
+  // Arama kelimeleri: "20' Standard Dry" → "20 Standard", "20", "Standard Dry"
+  const searchTerms = [
+    item.name.replace(/['"]/g, ' ').replace(/\s+/g, ' ').trim(),
+    item.shortName || '',
+    (item.name.match(/\d+/) || [])[0] || '', // "20" / "40" / "45"
+    item.name.split(/\s+/).slice(0, 2).join(' '),
+  ].filter(Boolean);
+
+  for (const term of searchTerms) {
+    try {
+      const url = `${baseUrl}/Select2/GetValueForContainerSelect2Search?SELECT2SEARCHVAL=${encodeURIComponent(term)}`;
+      const res = await fetch(url, { method: 'GET', headers });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const arr = Array.isArray(data) ? data : data?.results || data?.data || [];
+
+      for (const row of arr) {
+        const rid = row.rid || row.RID || row.containerrid || row.id;
+        const cname = String(
+          row.containername || row.containertype || row.name || row.text || ''
+        ).trim();
+        const cnameLower = cname.toLowerCase();
+
+        if (!isGuid(rid)) continue;
+
+        // Cache'e yaz
+        if (cname) globalContainerMap[cnameLower] = String(rid);
+
+        // Eşleşme: tam ad, shortName veya "20" + "standard"/"dry"
+        const target = nameKey.replace(/['"]/g, '');
+        const candidate = cnameLower.replace(/['"]/g, '');
+        if (
+          candidate === target ||
+          candidate.includes(target) ||
+          target.includes(candidate) ||
+          (shortKey && candidate.includes(shortKey.replace(/'/g, ''))) ||
+          (/\b20\b/.test(target) && /\b20\b/.test(candidate) && /standard|dry|st\b/i.test(candidate))
+        ) {
+          console.log('[CONTAINER RESOLVED]', item.name, '→', rid, cname);
+          return String(rid);
+        }
+      }
+    } catch (e) {
+      console.log('[CONTAINER RESOLVE ERR]', term, e);
+    }
+  }
+
+  console.log('[CONTAINER MAP MISS FINAL]', item.name, item.id);
+  return undefined;
 }
 
 function filterOptionsLocally(options: OptionItem[], cleanQuery: string): OptionItem[] {
@@ -739,6 +861,17 @@ export function KotasyonAramaScreen({
           const data = await res.json();
           const arr = Array.isArray(data) ? data : data?.data || data?.result || data?.items || [];
           if (Array.isArray(arr) && arr.length > 0) {
+            arr.forEach((item: any) => {
+              const cRid = item.containerrid || item.CONTAINERRID || item.rid || item.RID || item.id;
+              const cName = item.containertype || item.CONTAINERTYPE || item.name || item.text;
+              const cShort = item.containertypeshort || item.CONTAINERTYPESHORT || item.shortname;
+              if (cRid && cName) {
+                globalContainerMap[String(cName).trim().toLowerCase()] = String(cRid).trim();
+              }
+              if (cRid && cShort) {
+                globalContainerMap[String(cShort).trim().toLowerCase()] = String(cRid).trim();
+              }
+            });
             const mapped = arr.map(normalizeOptionItem).filter((opt) => opt.id && opt.name);
             if (mapped.length > 0) {
               setApiContainerOptions(mapped);
@@ -760,10 +893,17 @@ export function KotasyonAramaScreen({
 
   // Form selection states (IDs and Names)
   const [selectedHat, setSelectedHat] = useState<OptionItem | null>(() => {
-    if (initialValues?.lineRID || initialValues?.hat) {
+    const rid =
+      initialValues?.lineRID ||
+      initialValues?.lineRid ||
+      initialValues?.hatRID ||
+      initialValues?.hatRid ||
+      '';
+    const name = initialValues?.hat || '';
+    if (rid || name) {
       return {
-        id: initialValues.lineRID || '',
-        name: initialValues.hat || '',
+        id: rid,
+        name: name,
       };
     }
     return null;
@@ -787,6 +927,38 @@ export function KotasyonAramaScreen({
     }
     return [];
   });
+
+  useEffect(() => {
+    if (apiContainerOptions.length > 0) {
+      setSelectedContainerTypes((prev) => {
+        if (prev.length === 0) {
+          if (initialValues?.containerTypeRIDs && initialValues.containerTypeRIDs.length > 0) {
+            return apiContainerOptions.filter((c) =>
+              initialValues.containerTypeRIDs?.includes(c.id)
+            );
+          }
+          if (initialValues?.konteynerTipi) {
+            const names = initialValues.konteynerTipi.split(',').map((s) => s.trim().toLowerCase());
+            return apiContainerOptions.filter((c) =>
+              names.includes(c.name.trim().toLowerCase()) ||
+              (c.shortName && names.includes(c.shortName.trim().toLowerCase()))
+            );
+          }
+          return [];
+        } else {
+          return prev.map((item) => {
+            if (cleanGuidOrUndefined(item.id)) return item;
+            const match = apiContainerOptions.find(
+              (apiOpt) =>
+                apiOpt.name.toLowerCase() === item.name.toLowerCase() ||
+                (apiOpt.shortName && item.shortName && apiOpt.shortName.toLowerCase() === item.shortName.toLowerCase())
+            );
+            return match || item;
+          });
+        }
+      });
+    }
+  }, [apiContainerOptions, initialValues]);
 
   const [selectedDolumTipi, setSelectedDolumTipi] = useState<OptionItem | null>(() => {
     if (initialValues?.fillingType || initialValues?.dolumTipi) {
@@ -1197,21 +1369,21 @@ export function KotasyonAramaScreen({
       console.log('[KOTASYON DEBUG] selectedTeslimYeri:', selectedTeslimYeri);
       console.log('[KOTASYON DEBUG] selectedContainerTypes:', selectedContainerTypes);
 
-      // Step 1: Get Container Headers (/Offer/GetQuotationsContainers)
-      // Resolve container GUID RIDs (from c.id if valid GUID, or mapped from globalContainerMap by container name)
-      const validContainerRIDs = selectedContainerTypes
-        .map((c) => {
-          if (cleanGuidOrUndefined(c.id)) {
-            return cleanGuidOrUndefined(c.id);
-          }
-          const cNameLower = (c.name || '').trim().toLowerCase();
-          const mappedGuid = globalContainerMap[cNameLower];
-          return cleanGuidOrUndefined(mappedGuid);
-        })
-        .filter((id): id is string => Boolean(id));
+      await prefetchRealContainerRIDs(activeBaseUrl, authToken);
 
-      const containerRIDsString = validContainerRIDs.length > 0 ? validContainerRIDs.join(',') : undefined;
-      console.log('[KOTASYON DEBUG] containerRIDsString:', containerRIDsString);
+      const resolvedContainerRids: string[] = [];
+      for (const c of selectedContainerTypes) {
+        const rid = await resolveContainerRid(c, activeBaseUrl, authToken);
+        if (rid) resolvedContainerRids.push(rid);
+      }
+
+      const validContainerRIDs = resolvedContainerRids;
+      const containerRIDsString = resolvedContainerRids.length > 0 ? resolvedContainerRids.join(',') : undefined;
+      console.log('[CONTAINER RIDS]', containerRIDsString);
+
+      if (selectedContainerTypes.length > 0 && !containerRIDsString) {
+        console.warn('Konteyner tipi veritabanında bulunamadı:', selectedContainerTypes.map((c) => c.name));
+      }
 
       const containerReqData = { CONTAINERRIDS: containerRIDsString, CONTYPE: 'MSSQL' };
 
@@ -1260,13 +1432,14 @@ export function KotasyonAramaScreen({
       setContainerHeaders(containerHeaderList);
 
       // Step 2: Get Quotations (/Offer/GetQuotationsForCreateOffer)
-      const searchModel: QuotationForCreateOfferSearchModel = {
+      const searchModel: QuotationForCreateOfferSearchModel & { CONTAINERRIDS?: string } = {
         LINERID: cleanGuidOrUndefined(selectedHat?.id),
         LOADINGLOCATIONRID: cleanGuidOrUndefined(selectedYuklemeYeri?.id),
         LOADINGPORTRID: cleanGuidOrUndefined(selectedYuklemeLimani?.id),
         DISCHARGEPORTRID: cleanGuidOrUndefined(selectedTeslimLimani?.id),
         DISCHARGELOCATIONRID: cleanGuidOrUndefined(selectedTeslimYeri?.id),
         CONTAINERTYPERIDS: containerRIDsString,
+        CONTAINERRIDS: containerRIDsString,
         CUSTOMERRID: customerRID,
         LOADERRID: loaderRID,
         SHIPPINGTYPE: cleanStringFilterOrUndefined(tasimaTipi),
@@ -1278,7 +1451,7 @@ export function KotasyonAramaScreen({
         CONTYPE: 'MSSQL',
       };
 
-      // Progressive query fallback: Try full payload first, then fallback without customer-locking if 0 rows returned
+      // Progressive query fallback: Try full payload first, then fallback without customer-locking and without CONTAINERTYPERIDS if 0 rows returned
       const attemptsPayloads: QuotationForCreateOfferSearchModel[] = [
         searchModel,
         {
@@ -1300,6 +1473,19 @@ export function KotasyonAramaScreen({
           DISCHARGELOCATIONRID: searchModel.DISCHARGELOCATIONRID,
           LINERID: searchModel.LINERID,
           CONTAINERTYPERIDS: searchModel.CONTAINERTYPERIDS,
+          CONTYPE: 'MSSQL',
+        },
+        {
+          LOADINGPORTRID: searchModel.LOADINGPORTRID,
+          LOADINGLOCATIONRID: searchModel.LOADINGLOCATIONRID,
+          DISCHARGEPORTRID: searchModel.DISCHARGEPORTRID,
+          DISCHARGELOCATIONRID: searchModel.DISCHARGELOCATIONRID,
+          LINERID: searchModel.LINERID,
+          CONTYPE: 'MSSQL',
+        },
+        {
+          LOADINGPORTRID: searchModel.LOADINGPORTRID,
+          DISCHARGEPORTRID: searchModel.DISCHARGEPORTRID,
           CONTYPE: 'MSSQL',
         },
       ];
@@ -1340,17 +1526,8 @@ export function KotasyonAramaScreen({
       }
 
       if (!quotationList || quotationList.length === 0) {
-        console.warn('[KOTASYON DEBUG] Gerçek API sonuç dönmedi, mock veriye düşülüyor. Nedenini kontrol edin (endpoint/yetki/casing/containerRIDs).');
-        quotationList = getMockQuotations(
-          selectedHat,
-          selectedYuklemeLimani,
-          selectedTeslimLimani,
-          selectedYuklemeYeri,
-          selectedTeslimYeri,
-          selectedDolumTipi,
-          selectedOdemeTipi,
-          selectedContainerTypes
-        );
+        console.log('[KOTASYON DEBUG] Arama sonucunda kotasyon bulunamadı. 0 sonuç gösteriliyor.');
+        quotationList = [];
       }
 
       // Step 3: Fetch Extended Expenses for each Quotation (/Offer/GetQuotationsContainerExtendedExpenses)
@@ -1473,8 +1650,11 @@ export function KotasyonAramaScreen({
         tasimaTipi,
         ticariTipi,
         yuklemeTipi,
-        hat: selectedHat?.name,
-        lineRID: selectedHat?.id,
+        hat: selectedHat?.name || initialValues?.hat,
+        lineRID: selectedHat?.id || initialValues?.lineRID || initialValues?.lineRid,
+        lineRid: selectedHat?.id || initialValues?.lineRid || initialValues?.lineRID,
+        hatRID: selectedHat?.id || initialValues?.hatRID || initialValues?.hatRid,
+        hatRid: selectedHat?.id || initialValues?.hatRid || initialValues?.hatRID,
         odemeTipi: selectedOdemeTipi?.name,
         payment: selectedOdemeTipi?.name,
         containerTypeRIDs: selectedContainerTypes.map((c) => c.id),
@@ -2950,10 +3130,18 @@ export function KotasyonAramaScreen({
 
                 <Pressable
                   onPress={async () => {
-                    if (selectedQuotationRIDs.length < 1) {
+                    const isImport = isImportCommercialType(
+                      ticariTipi,
+                      initialValues?.ticariTipi,
+                      (initialValues as any)?.COMMERCIALTYPE,
+                      (initialValues as any)?.commercialType
+                    );
+                    const forceQuotation = !isImport;
+
+                    if (forceQuotation && selectedQuotationRIDs.length < 1) {
                       setActiveReasonModal({
                         title: 'İşlem Tamamlanamadı',
-                        text: 'Teklif oluşturma işlemine devam edebilmek için lütfen önce bir kotasyon seçiniz.',
+                        text: 'İhracat teklifi için kotasyon seçimi zorunludur.',
                       });
                       return;
                     }
@@ -2969,85 +3157,89 @@ export function KotasyonAramaScreen({
                       .map((h) => cleanGuidOrUndefined(h.containerrid))
                       .filter((id): id is string => !!id);
 
-                    const payload = {
-                      selectedRids: selectedQuotationRIDs,
-                      shippingType: tasimaTipi,
-                      commercialType: ticariTipi,
-                      loadingType: yuklemeTipi,
-                      customerRid: custRid,
-                      selectedContainerRids: validContainerRids.length > 0 ? validContainerRids : containerHeaders.map((h) => h.containerrid),
-                      requestNo: '',
-                      selectedLocationRid: selectedYuklemeYeri?.id || '',
-                      loaderRid: selectedYukleyici?.id || '',
-                      loader: selectedYukleyici?.name || '',
-                      selectedLandShippingOptions: landShippingSelections,
-                    };
-
-                    const headers: Record<string, string> = {
-                      'Content-Type': 'application/json',
-                    };
-                    if (authToken) {
-                      headers['Authorization'] = authToken.startsWith('Bearer ')
-                        ? authToken
-                        : `Bearer ${authToken}`;
-                    }
-
                     let createdOffer: any = null;
 
-                    try {
-                      const res = await fetch(`${activeBaseUrl}/Offer/CreateOffer`, {
-                        method: 'POST',
-                        headers,
-                        body: JSON.stringify(payload),
-                      });
-                      if (res.ok) {
-                        createdOffer = await res.json().catch(() => null);
-                        console.log('[CREATE OFFER SUCCESS]', JSON.stringify(createdOffer));
+                    if (selectedQuotationRIDs.length > 0) {
+                      const payload = {
+                        selectedRids: selectedQuotationRIDs,
+                        shippingType: tasimaTipi,
+                        commercialType: ticariTipi,
+                        loadingType: yuklemeTipi,
+                        customerRid: custRid,
+                        selectedContainerRids: validContainerRids.length > 0 ? validContainerRids : containerHeaders.map((h) => h.containerrid),
+                        requestNo: '',
+                        selectedLocationRid: selectedYuklemeYeri?.id || '',
+                        loaderRid: selectedYukleyici?.id || '',
+                        loader: selectedYukleyici?.name || '',
+                        selectedLandShippingOptions: landShippingSelections,
+                      };
+
+                      const headers: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                      };
+                      if (authToken) {
+                        headers['Authorization'] = authToken.startsWith('Bearer ')
+                          ? authToken
+                          : `Bearer ${authToken}`;
                       }
-                    } catch (e) {
-                      console.warn('[CREATE OFFER FAILED]', e);
+
+                      try {
+                        const res = await fetch(`${activeBaseUrl}/Offer/CreateOffer`, {
+                          method: 'POST',
+                          headers,
+                          body: JSON.stringify(payload),
+                        });
+                        if (res.ok) {
+                          createdOffer = await res.json().catch(() => null);
+                          console.log('[CREATE OFFER SUCCESS]', JSON.stringify(createdOffer));
+                        }
+                      } catch (e) {
+                        console.warn('[CREATE OFFER FAILED]', e);
+                      }
                     }
 
                     const offerRidVal = createdOffer?.OFFERRID || createdOffer?.offerrid;
 
-                    const selectedList = quotationResults
-                      .filter((q) => selectedQuotationRIDs.includes(q.quotationrid))
-                      .map((q) => {
-                        const extList = extendedExpensesMap[q.quotationrid] || [];
-                        const detail = (extendedExpensesMap[q.quotationrid] as any) || (viewQuotationModal?.quotationrid === q.quotationrid ? viewQuotationModal : {});
-                        const extLinerid =
-                          (q as any).linerid ||
-                          (q as any).LINERID ||
-                          (q as any).lineRid ||
-                          (q as any).lineRID ||
-                          (q as any).hatrid ||
-                          (q as any).HATRID ||
-                          detail?.linerid ||
-                          detail?.LINERID ||
-                          detail?.lineRid ||
-                          detail?.lineRID ||
-                          selectedHat?.id ||
-                          null;
-                        return {
-                          ...q,
-                          linerid: extLinerid,
-                          LINERID: extLinerid,
-                          lineRid: extLinerid,
-                          lineRID: extLinerid,
-                          frontshipping: (q as any).frontshipping || detail?.frontshipping,
-                          localexpense: (q as any).localexpense || (q as any).localexpenses || detail?.localexpense || detail?.localexpenses,
-                          lastshipping: (q as any).lastshipping || detail?.lastshipping,
-                          custom: (q as any).custom || detail?.custom,
-                          documentation: (q as any).documentation || detail?.documentation,
-                          portexpenses: (q as any).portexpenses || detail?.portexpenses,
-                          quotationexpensedetail: (q as any).quotationexpensedetail || detail?.quotationexpensedetail || detail?.quotationExpenseDetail || extList,
-                          offerrid: offerRidVal || (q as any).offerrid,
-                          OFFERRID: offerRidVal || (q as any).OFFERRID,
-                          extendedexpenses: extList,
-                          OFFEREXPENSES: createdOffer?.OFFEREXPENSES || createdOffer?.offerexpenses || (q as any).OFFEREXPENSES || [],
-                          QUOTATIONCONTAINERS: createdOffer?.QUOTATIONCONTAINERS || createdOffer?.quotationcontainers || (q as any).containersinfo || [],
-                        };
-                      });
+                    const selectedList = selectedQuotationRIDs.length > 0
+                      ? quotationResults
+                        .filter((q) => selectedQuotationRIDs.includes(q.quotationrid))
+                        .map((q) => {
+                          const extList = extendedExpensesMap[q.quotationrid] || [];
+                          const detail = (extendedExpensesMap[q.quotationrid] as any) || (viewQuotationModal?.quotationrid === q.quotationrid ? viewQuotationModal : {});
+                          const extLinerid =
+                            (q as any).linerid ||
+                            (q as any).LINERID ||
+                            (q as any).lineRid ||
+                            (q as any).lineRID ||
+                            (q as any).hatrid ||
+                            (q as any).HATRID ||
+                            detail?.linerid ||
+                            detail?.LINERID ||
+                            detail?.lineRid ||
+                            detail?.lineRID ||
+                            selectedHat?.id ||
+                            null;
+                          return {
+                            ...q,
+                            linerid: extLinerid,
+                            LINERID: extLinerid,
+                            lineRid: extLinerid,
+                            lineRID: extLinerid,
+                            frontshipping: (q as any).frontshipping || detail?.frontshipping,
+                            localexpense: (q as any).localexpense || (q as any).localexpenses || detail?.localexpense || detail?.localexpenses,
+                            lastshipping: (q as any).lastshipping || detail?.lastshipping,
+                            custom: (q as any).custom || detail?.custom,
+                            documentation: (q as any).documentation || detail?.documentation,
+                            portexpenses: (q as any).portexpenses || detail?.portexpenses,
+                            quotationexpensedetail: (q as any).quotationexpensedetail || detail?.quotationexpensedetail || detail?.quotationExpenseDetail || extList,
+                            offerrid: offerRidVal || (q as any).offerrid,
+                            OFFERRID: offerRidVal || (q as any).OFFERRID,
+                            extendedexpenses: extList,
+                            OFFEREXPENSES: createdOffer?.OFFEREXPENSES || createdOffer?.offerexpenses || (q as any).OFFEREXPENSES || [],
+                            QUOTATIONCONTAINERS: createdOffer?.QUOTATIONCONTAINERS || createdOffer?.quotationcontainers || (q as any).containersinfo || [],
+                          };
+                        })
+                      : undefined;
 
                     setShowSearchResults(false);
                     if (onSubmit) {
@@ -3056,11 +3248,11 @@ export function KotasyonAramaScreen({
                           tasimaTipi,
                           ticariTipi,
                           yuklemeTipi,
-                          hat: selectedHat?.name,
-                          lineRID: selectedHat?.id,
-                          lineRid: selectedHat?.id,
-                          hatRID: selectedHat?.id,
-                          hatRid: selectedHat?.id,
+                          hat: selectedHat?.name || initialValues?.hat,
+                          lineRID: selectedHat?.id || initialValues?.lineRID || initialValues?.lineRid,
+                          lineRid: selectedHat?.id || initialValues?.lineRid || initialValues?.lineRID,
+                          hatRID: selectedHat?.id || initialValues?.hatRID || initialValues?.hatRid,
+                          hatRid: selectedHat?.id || initialValues?.hatRid || initialValues?.hatRID,
                           odemeTipi: selectedOdemeTipi?.name,
                           payment: selectedOdemeTipi?.name,
                           containerTypeRIDs: selectedContainerTypes.map((c) => c.id),
@@ -3069,17 +3261,24 @@ export function KotasyonAramaScreen({
                           fillingType: selectedDolumTipi?.name,
                           tehlikelilikDurumu: selectedTehlikelilik?.name,
                           flammability: selectedTehlikelilik?.name,
-                          yukleyici: selectedYukleyici?.name,
+                          yukleyici: selectedYukleyici?.name || initialValues?.customerName || initialValues?.yukleyici,
+                          customerName: selectedYukleyici?.name || initialValues?.customerName || initialValues?.yukleyici,
                           loaderRID: selectedYukleyici?.id,
+                          loaderRid: selectedYukleyici?.id,
                           customerRID: custRid,
+                          customerRid: custRid,
                           yuklemeYeri: selectedYuklemeYeri?.name,
                           loadingLocationRID: selectedYuklemeYeri?.id,
+                          loadingLocationRid: selectedYuklemeYeri?.id,
                           yuklemeLimani: selectedYuklemeLimani?.name,
                           loadingPortRID: selectedYuklemeLimani?.id,
+                          loadingPortRid: selectedYuklemeLimani?.id,
                           teslimYeri: selectedTeslimYeri?.name,
                           dischargeLocationRID: selectedTeslimYeri?.id,
+                          dischargeLocationRid: selectedTeslimYeri?.id,
                           teslimLimani: selectedTeslimLimani?.name,
                           dischargePortRID: selectedTeslimLimani?.id,
+                          dischargePortRid: selectedTeslimLimani?.id,
                         },
                         selectedList
                       );
@@ -3090,7 +3289,9 @@ export function KotasyonAramaScreen({
                   style={styles.submitBtn}
                 >
                   <ThemedText style={styles.submitBtnText}>
-                    {`Seçilen Kotasyonlar ile Teklif Oluştur (${selectedQuotationRIDs.length})`}
+                    {selectedQuotationRIDs.length > 0
+                      ? `Seçilen Kotasyonlar ile Teklif Oluştur (${selectedQuotationRIDs.length})`
+                      : `Teklif Oluştur${isImportCommercialType(ticariTipi, initialValues?.ticariTipi) ? ' (Kotasyonsuz)' : ''}`}
                   </ThemedText>
                 </Pressable>
               </View>
@@ -3401,7 +3602,7 @@ export function KotasyonAramaScreen({
                     filteredExpenses.forEach((exp: any) => {
                       const eBeher = String(exp.beher || exp.BEHER || exp.unit || exp.UNIT || exp.per || exp.PER || '').toUpperCase().trim();
                       const rawType = exp.containertype || exp.CONTAINERTYPE || exp.containertypeshort || exp.CONTAINERTYPESHORT;
-                      
+
                       const masrafTipi = exp.expensetype || exp.optionlabel || exp.type || exp.EXPENSETYPE || exp.OPTIONLABEL || exp.TYPE || 'MASRAF';
                       const alisFiyati = String(exp.buyingcost ?? exp.containercost ?? exp.BUYINGCOST ?? exp.CONTAINERCOST ?? exp.cost ?? exp.COST ?? '0');
                       const kdv = String(exp.kdv ?? exp.KDV ?? '0');
@@ -3779,7 +3980,7 @@ export function SearchablePickerModal({
       return;
     }
 
-    // Debounced search: Wait 500ms after user stops typing before triggering search
+    // Debounced search: Wait 300ms after user stops typing before triggering search
     const timer = setTimeout(async () => {
       if (!isMounted) return;
       console.log(`[SEARCH PICKER DEBUG] Debounce doldu, aranıyor: "${clean}", type: ${type}`);
@@ -3796,7 +3997,7 @@ export function SearchablePickerModal({
         setOptions(results);
         setIsLoading(false);
       }
-    }, 500);
+    }, 300);
 
     return () => {
       isMounted = false;
@@ -4733,75 +4934,3 @@ const styles = StyleSheet.create({
   },
 });
 
-function getMockQuotations(
-  hat?: OptionItem | null,
-  loadingPort?: OptionItem | null,
-  dischargePort?: OptionItem | null,
-  loadingLoc?: OptionItem | null,
-  dischargeLoc?: OptionItem | null,
-  fillingType?: OptionItem | null,
-  payment?: OptionItem | null,
-  containerTypes: OptionItem[] = []
-): QuotationForCreateOfferModel[] {
-  const c1Id = containerTypes[0]?.id || 'cnt-1';
-  const c2Id = containerTypes[1]?.id || 'cnt-2';
-
-  return [
-    {
-      quotationrid: 'q-1001-0000-0000-000000000001',
-      quotationno: 'QT-2024-0891',
-      quotationvaliditydate: '31.10.2024',
-      line: hat?.name || 'Turkon Line',
-      loadinglocation: loadingLoc?.name || 'İzmir Fabrika',
-      loadinglocationshort: loadingLoc?.shortName || 'İzmir Fab.',
-      loadingport: loadingPort?.name || 'Ambarlı Limanı (TRAMB)',
-      loadingportshort: loadingPort?.shortName || 'Ambarlı',
-      dischargeport: dischargePort?.name || 'Rotterdam (NLRTM)',
-      dischargeportshort: dischargePort?.shortName || 'Rotterdam',
-      dischargelocation: dischargeLoc?.name || 'Rotterdam Liman Saha',
-      dischargelocationshort: dischargeLoc?.shortName || 'Rotterdam S.',
-      freetime: 14,
-      fillingtype: fillingType?.name || 'Fabrika Dolum',
-      payment: payment?.name || 'Freight Pre-paid',
-      transittime: 12,
-      service: 'Direct Express',
-      type: 'NAC',
-      customername: 'TEST A.Ş.',
-      isspecialforcustomer: 1,
-      isselectable: 1,
-      localexpenseisselectable: 1,
-      note: 'Özel hat anlaşması kapsamındadır.',
-      containersinfo: [
-        { containerrid: c1Id, containertype: containerTypes[0]?.name || "20' Standard Dry", containercost: 1250 },
-        { containerrid: c2Id, containertype: containerTypes[1]?.name || "40' Standard Dry", containercost: 1650 },
-      ],
-    },
-    {
-      quotationrid: 'q-2002-0000-0000-000000000002',
-      quotationno: 'QT-2024-0942',
-      quotationvaliditydate: '15.11.2024',
-      line: 'Maersk Line',
-      loadinglocation: loadingLoc?.name || 'Gebze OSB',
-      loadinglocationshort: 'Gebze OSB',
-      loadingport: loadingPort?.name || 'Kumport (TRKUM)',
-      loadingportshort: 'Kumport',
-      dischargeport: dischargePort?.name || 'Hamburg (DEHAM)',
-      dischargeportshort: 'Hamburg',
-      dischargelocation: 'Hamburg Depo',
-      dischargelocationshort: 'Hamburg D.',
-      freetime: 10,
-      fillingtype: fillingType?.name || 'Fabrika Dolum',
-      payment: 'Freight Pre-paid',
-      transittime: 14,
-      service: 'AE-1 Line',
-      type: 'STD',
-      isspecialforcustomer: 0,
-      isselectable: 1,
-      localexpenseisselectable: 1,
-      containersinfo: [
-        { containerrid: c1Id, containertype: containerTypes[0]?.name || "20' Standard Dry", containercost: 1380 },
-        { containerrid: c2Id, containertype: containerTypes[1]?.name || "40' Standard Dry", containercost: 1820 },
-      ],
-    },
-  ];
-}

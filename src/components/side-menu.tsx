@@ -24,6 +24,7 @@ export interface SideMenuProps {
   onLogout?: () => void;
   onOpenCariYonetimi?: () => void;
   onOpenCariCreate?: () => void;
+  onOpenSystemSettings?: () => void;
 }
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -36,6 +37,7 @@ export function SideMenu({
   onLogout,
   onOpenCariYonetimi,
   onOpenCariCreate,
+  onOpenSystemSettings,
 }: SideMenuProps) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -113,6 +115,7 @@ export function SideMenu({
           description: 'Tercihler ve genel yapılandırmalar',
           onPress: () => {
             onClose();
+            if (onOpenSystemSettings) onOpenSystemSettings();
           },
         },
         {
